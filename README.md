@@ -7,6 +7,14 @@
 A local proxy that translates the **Anthropic Messages API** into **OpenAI Chat Completions**, so any Anthropic-protocol client (e.g.
  Claude Code) can talk to an OpenAI-compatible backend.
 
+## Platform support
+
+**Linux and macOS only.** Windows is not supported and not tested.
+
+- Linux: tested on systemd-based distros (Arch, Ubuntu, Fedora). Service install uses user-level systemd units.
+- macOS: tested on macOS 13+. Service install uses LaunchAgents.
+- Windows: untested. The package may import on Windows, but `claudify install-service` will fail and config paths follow XDG conventions, not Windows conventions. Use WSL2 if you need to run claudify on a Windows machine.
+
 ## Install
 
 ```bash
