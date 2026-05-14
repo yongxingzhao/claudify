@@ -26,7 +26,5 @@ upstream_unavailable.
 
 Pitfalls
 
-- _legacy_anthropic_proxy.py is the original single-file version, kept for reference only — don't import from it; it embeds an API
-key.
 - ~/.config/claudify/config.toml is gitignored and chmod 0600 — never commit.
 - Unknown model names fall through model_map → default_model → original.
