@@ -12,9 +12,9 @@ Items are grouped by PR batch. Each batch lands as a single feature branch.
 
 | # | Item | Status |
 |---|------|--------|
-| 1 | Run `ruff format` across all files | pending |
-| 2 | Commit `uv.lock` for reproducible installs | pending |
-| 3 | Raise `settings.py` coverage above 90% (test toml load + fallbacks) | pending |
+| 1 | Run `ruff format` across all files | done |
+| 2 | Commit `uv.lock` for reproducible installs | done |
+| 3 | Raise `settings.py` coverage above 90% (test toml load + fallbacks) | done (97%) |
 
 Acceptance: `ruff format --check` passes, `uv.lock` tracked, `coverage report` shows settings ≥ 90%.
 
@@ -24,11 +24,11 @@ Acceptance: `ruff format --check` passes, `uv.lock` tracked, `coverage report` s
 
 | # | Item | Status |
 |---|------|--------|
-| 4 | Per-request structured logging with `request_id` (in / out / status / latency / upstream_status / tokens) | pending |
-| 5 | `/metrics` Prometheus-text endpoint (request count, latency histogram, upstream errors) | pending |
-| 6 | Bounded retry+backoff for upstream 502/503/504 (configurable, off by default) | pending |
-| 8 | On mid-stream upstream failure, emit synthetic `message_delta` + `message_stop` so clients exit cleanly | pending |
-| 9 | Split `request_timeout` into `connect_timeout` / `read_timeout` / `write_timeout` | pending |
+| 4 | Per-request structured logging with `request_id` (in / out / status / latency / upstream_status / tokens) | done |
+| 5 | `/metrics` Prometheus-text endpoint (request count, latency histogram, upstream errors) | done |
+| 6 | Bounded retry+backoff for upstream 502/503/504 (configurable, off by default) | done |
+| 8 | On mid-stream upstream failure, emit synthetic `message_delta` + `message_stop` so clients exit cleanly | done |
+| 9 | Split `request_timeout` into `connect_timeout` / `read_timeout` / `write_timeout` | done |
 
 Acceptance: new tests cover synthetic stream-stop; metrics endpoint scrapeable; logs include request_id.
 
