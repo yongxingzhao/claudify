@@ -81,8 +81,8 @@ def test_settings_load_reads_toml(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     cfg.write_text(
         'backend_base = "http://from-toml/v1"\n'
         'api_key = "from-toml"\n'
-        'port = 6001\n'
-        '[model_map]\n'
+        "port = 6001\n"
+        "[model_map]\n"
         '"claude-opus-4-7" = "hermes-agent"\n',
         encoding="utf-8",
     )
