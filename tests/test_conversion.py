@@ -1,4 +1,5 @@
 """Tests for claudify.conversion."""
+
 from __future__ import annotations
 
 import json
@@ -62,12 +63,16 @@ def test_anthropic_to_openai_no_user_guard():
 
 
 def test_anthropic_to_openai_stop_sequences_become_stop():
-    out = anthropic_to_openai({"model": "x", "messages": [{"role": "user", "content": "hi"}], "stop_sequences": ["END"]}, {})
+    out = anthropic_to_openai(
+        {"model": "x", "messages": [{"role": "user", "content": "hi"}], "stop_sequences": ["END"]}, {}
+    )
     assert out["stop"] == ["END"]
 
 
 def test_anthropic_to_openai_stream_options():
-    out = anthropic_to_openai({"model": "x", "messages": [{"role": "user", "content": "hi"}], "stream": True}, {})
+    out = anthropic_to_openai(
+        {"model": "x", "messages": [{"role": "user", "content": "hi"}], "stream": True}, {}
+    )
     assert out["stream"] is True
     assert out["stream_options"] == {"include_usage": True}
 
@@ -76,18 +81,26 @@ def test_anthropic_to_openai_tools_passthrough():
     payload = {
         "model": "x",
         "messages": [{"role": "user", "content": "hi"}],
-        "tools": [{"name": "lookup", "description": "lookup", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}}],
+        "tools": [
+            {
+                "name": "lookup",
+                "description": "lookup",
+                "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
+            }
+        ],
         "tool_choice": {"type": "tool", "name": "lookup"},
     }
     out = anthropic_to_openai(payload, {})
-    assert out["tools"] == [{
-        "type": "function",
-        "function": {
-            "name": "lookup",
-            "description": "lookup",
-            "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
-        },
-    }]
+    assert out["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "description": "lookup",
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+            },
+        }
+    ]
     assert out["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
 
 
@@ -96,13 +109,19 @@ def test_anthropic_to_openai_assistant_tool_use_to_tool_calls():
         "model": "x",
         "messages": [
             {"role": "user", "content": "find the weather"},
-            {"role": "assistant", "content": [
-                {"type": "text", "text": "calling..."},
-                {"type": "tool_use", "id": "toolu_1", "name": "weather", "input": {"city": "SF"}},
-            ]},
-            {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "sunny"},
-            ]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "calling..."},
+                    {"type": "tool_use", "id": "toolu_1", "name": "weather", "input": {"city": "SF"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "sunny"},
+                ],
+            },
         ],
     }
     out = anthropic_to_openai(payload, {})
@@ -111,11 +130,13 @@ def test_anthropic_to_openai_assistant_tool_use_to_tool_calls():
         {
             "role": "assistant",
             "content": "calling...",
-            "tool_calls": [{
-                "id": "toolu_1",
-                "type": "function",
-                "function": {"name": "weather", "arguments": json.dumps({"city": "SF"})},
-            }],
+            "tool_calls": [
+                {
+                    "id": "toolu_1",
+                    "type": "function",
+                    "function": {"name": "weather", "arguments": json.dumps({"city": "SF"})},
+                }
+            ],
         },
         {"role": "tool", "tool_call_id": "toolu_1", "content": "sunny"},
     ]
@@ -125,9 +146,12 @@ def test_anthropic_to_openai_tool_result_error_marker():
     payload = {
         "model": "x",
         "messages": [
-            {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "t1", "content": "boom", "is_error": True},
-            ]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "boom", "is_error": True},
+                ],
+            },
         ],
     }
     out = anthropic_to_openai(payload, {})
@@ -138,10 +162,18 @@ def test_anthropic_to_openai_tool_result_error_marker():
 def test_anthropic_to_openai_image_block_to_data_url():
     payload = {
         "model": "x",
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": "what's this"},
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
-        ]}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what's this"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
+                    },
+                ],
+            }
+        ],
     }
     out = anthropic_to_openai(payload, {})
     user_msg = [m for m in out["messages"] if m["role"] == "user"][0]
@@ -162,23 +194,33 @@ def test_openai_to_anthropic_response_text_only():
 
 def test_openai_to_anthropic_response_tool_calls():
     resp = {
-        "choices": [{
-            "message": {
-                "content": None,
-                "tool_calls": [{
-                    "id": "call_1", "type": "function",
-                    "function": {"name": "weather", "arguments": json.dumps({"city": "SF"})},
-                }],
-            },
-            "finish_reason": "tool_calls",
-        }],
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "weather", "arguments": json.dumps({"city": "SF"})},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1},
     }
     out = openai_to_anthropic_response(resp, "x")
     assert out["stop_reason"] == "tool_use"
-    assert out["content"] == [{
-        "type": "tool_use", "id": "call_1", "name": "weather", "input": {"city": "SF"},
-    }]
+    assert out["content"] == [
+        {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "weather",
+            "input": {"city": "SF"},
+        }
+    ]
 
 
 async def _gather(agen):
@@ -248,13 +290,19 @@ def test_anthropic_to_openai_tool_result_precedes_user_text_in_same_turn():
         "model": "x",
         "messages": [
             {"role": "user", "content": "go look it up"},
-            {"role": "assistant", "content": [
-                {"type": "tool_use", "id": "tool_1", "name": "search", "input": {"q": "x"}},
-            ]},
-            {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "tool_1", "content": "found"},
-                {"type": "text", "text": "thanks, what about Y?"},
-            ]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "tool_1", "name": "search", "input": {"q": "x"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tool_1", "content": "found"},
+                    {"type": "text", "text": "thanks, what about Y?"},
+                ],
+            },
         ],
     }
     out = anthropic_to_openai(payload, {})

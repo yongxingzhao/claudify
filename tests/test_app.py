@@ -1,4 +1,5 @@
 """Tests for the FastAPI app via httpx.MockTransport."""
+
 from __future__ import annotations
 
 import json
@@ -68,11 +69,14 @@ async def test_messages_non_streaming_round_trip():
 
     client, app = _client(handler)
     async with client, app.router.lifespan_context(app):
-        r = await client.post("/v1/messages", json={
-            "model": "claude-opus-4-7",
-            "max_tokens": 32,
-            "messages": [{"role": "user", "content": "ping"}],
-        })
+        r = await client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-opus-4-7",
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+        )
 
     assert r.status_code == 200
     body = r.json()
@@ -93,10 +97,13 @@ async def test_messages_upstream_error_passthrough():
 
     client, app = _client(handler)
     async with client, app.router.lifespan_context(app):
-        r = await client.post("/v1/messages", json={
-            "model": "claude-opus-4-7",
-            "messages": [{"role": "user", "content": "x"}],
-        })
+        r = await client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-opus-4-7",
+                "messages": [{"role": "user", "content": "x"}],
+            },
+        )
 
     assert r.status_code == 429
     body = r.json()
@@ -112,10 +119,13 @@ async def test_messages_upstream_unavailable_returns_502():
 
     client, app = _client(handler)
     async with client, app.router.lifespan_context(app):
-        r = await client.post("/v1/messages", json={
-            "model": "claude-opus-4-7",
-            "messages": [{"role": "user", "content": "x"}],
-        })
+        r = await client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-opus-4-7",
+                "messages": [{"role": "user", "content": "x"}],
+            },
+        )
 
     assert r.status_code == 502
     assert r.json()["error"]["type"] == "upstream_unavailable"
@@ -135,11 +145,15 @@ async def test_messages_streaming_relays_anthropic_events():
     client, app = _client(handler)
     async with app.router.lifespan_context(app):
         async with client:
-            async with client.stream("POST", "/v1/messages", json={
-                "model": "claude-opus-4-7",
-                "stream": True,
-                "messages": [{"role": "user", "content": "x"}],
-            }) as r:
+            async with client.stream(
+                "POST",
+                "/v1/messages",
+                json={
+                    "model": "claude-opus-4-7",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "x"}],
+                },
+            ) as r:
                 assert r.status_code == 200
                 text = b"".join([c async for c in r.aiter_raw()]).decode()
 
@@ -153,7 +167,9 @@ async def test_messages_streaming_relays_anthropic_events():
 async def test_messages_invalid_json_400():
     client, app = _client(lambda r: httpx.Response(500))
     async with client, app.router.lifespan_context(app):
-        r = await client.post("/v1/messages", content=b"{not json", headers={"content-type": "application/json"})
+        r = await client.post(
+            "/v1/messages", content=b"{not json", headers={"content-type": "application/json"}
+        )
     assert r.status_code == 400
     assert r.json()["error"]["type"] == "invalid_request_error"
 
@@ -162,11 +178,14 @@ async def test_messages_invalid_json_400():
 async def test_count_tokens_returns_estimate():
     client, app = _client(lambda r: httpx.Response(500))
     async with client, app.router.lifespan_context(app):
-        r = await client.post("/v1/messages/count_tokens", json={
-            "model": "claude-opus-4-7",
-            "system": "You are helpful.",
-            "messages": [{"role": "user", "content": "hello world"}],
-        })
+        r = await client.post(
+            "/v1/messages/count_tokens",
+            json={
+                "model": "claude-opus-4-7",
+                "system": "You are helpful.",
+                "messages": [{"role": "user", "content": "hello world"}],
+            },
+        )
     assert r.status_code == 200
     body = r.json()
     assert isinstance(body["input_tokens"], int)
@@ -191,20 +210,21 @@ async def test_streaming_request_uses_unbounded_read_timeout():
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["timeout"] = request.extensions.get("timeout")
-        body = (
-            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
-            b'data: [DONE]\n\n'
-        )
+        body = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
         return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
     client, app = _client(handler)
     async with app.router.lifespan_context(app):
         async with client:
-            async with client.stream("POST", "/v1/messages", json={
-                "model": "claude-opus-4-7",
-                "stream": True,
-                "messages": [{"role": "user", "content": "x"}],
-            }) as r:
+            async with client.stream(
+                "POST",
+                "/v1/messages",
+                json={
+                    "model": "claude-opus-4-7",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "x"}],
+                },
+            ) as r:
                 async for _ in r.aiter_raw():
                     pass
 

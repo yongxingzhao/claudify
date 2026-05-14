@@ -1,4 +1,5 @@
 """macOS LaunchAgent installer."""
+
 from __future__ import annotations
 
 import shutil
@@ -40,7 +41,9 @@ def _log_dir() -> Path:
 def install() -> None:
     exec_path = shutil.which("claudify") or "claudify"
     target = _agent_dir() / PLIST_NAME
-    target.write_text(PLIST_TEMPLATE.format(label=LABEL, exec_path=exec_path, log_dir=str(_log_dir())), encoding="utf-8")
+    target.write_text(
+        PLIST_TEMPLATE.format(label=LABEL, exec_path=exec_path, log_dir=str(_log_dir())), encoding="utf-8"
+    )
     subprocess.run(["launchctl", "unload", str(target)], check=False)
     subprocess.run(["launchctl", "load", str(target)], check=True)
     print(f"installed {target}")

@@ -1,4 +1,5 @@
 """FastAPI app factory."""
+
 from __future__ import annotations
 
 import json as _json
@@ -75,7 +76,9 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
         ids = sorted(set(list(s.model_map.keys()) + ([s.default_model] if s.default_model else [])))
         return {
             "object": "list",
-            "data": [{"id": m, "object": "model", "created": int(time.time()), "owned_by": "claudify"} for m in ids],
+            "data": [
+                {"id": m, "object": "model", "created": int(time.time()), "owned_by": "claudify"} for m in ids
+            ],
         }
 
     @app.post("/v1/messages/count_tokens")
@@ -131,7 +134,10 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
                     read=None,
                 )
                 req = client.build_request(
-                    "POST", url, json=openai_payload, headers=headers,
+                    "POST",
+                    url,
+                    json=openai_payload,
+                    headers=headers,
                     timeout=stream_timeout,
                 )
                 upstream = await client.send(req, stream=True)

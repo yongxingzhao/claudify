@@ -1,4 +1,5 @@
 """Linux user-level systemd installer."""
+
 from __future__ import annotations
 
 import shutil
