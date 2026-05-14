@@ -198,12 +198,13 @@ def anthropic_to_openai(payload: dict[str, Any], model_map: dict[str, str], defa
         content = msg.get("content")
         if role == "user":
             user_content, tool_msgs = _user_content_to_openai(content)
-            # OpenAI requires tool messages to follow the assistant tool_call that
-            # produced them. Emit them first if the user message had no leading text,
-            # otherwise emit user text first then tool messages.
+            # OpenAI requires {role:tool} messages to immediately follow the
+            # assistant turn whose tool_calls produced them — no user message
+            # may sit between. Anthropic allows mixing tool_result and text in
+            # one user turn, so we emit tools first, then any user text.
+            out_messages.extend(tool_msgs)
             if user_content not in ("", []):
                 out_messages.append({"role": "user", "content": user_content})
-            out_messages.extend(tool_msgs)
         elif role == "assistant":
             text, tool_calls = _assistant_content_to_openai(content)
             entry: dict[str, Any] = {"role": "assistant", "content": text or None}
@@ -321,6 +322,7 @@ async def stream_openai_to_anthropic(
     finish_reason = "stop"
     upstream_usage: dict[str, Any] | None = None
     text_block_open = False
+    text_block_index = 0
     next_index = 0
     # Map upstream tool_call index → our SSE block index + accumulated args
     tool_state: dict[int, dict[str, Any]] = {}

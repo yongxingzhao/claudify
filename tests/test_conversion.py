@@ -238,3 +238,29 @@ async def test_stream_handles_upstream_exception_gracefully():
     assert "event: content_block_stop" in text
     assert "event: message_delta" in text
     assert "event: message_stop" in text
+
+
+def test_anthropic_to_openai_tool_result_precedes_user_text_in_same_turn():
+    # Anthropic lets a single user turn carry both tool_result and new text;
+    # OpenAI requires {role:tool} to immediately follow the assistant tool_call,
+    # so tool messages must be emitted BEFORE any user text from that turn.
+    payload = {
+        "model": "x",
+        "messages": [
+            {"role": "user", "content": "go look it up"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tool_1", "name": "search", "input": {"q": "x"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tool_1", "content": "found"},
+                {"type": "text", "text": "thanks, what about Y?"},
+            ]},
+        ],
+    }
+    out = anthropic_to_openai(payload, {})
+    roles = [m["role"] for m in out["messages"]]
+    # The tool message must sit directly after the assistant turn,
+    # with the user text following it.
+    assert roles == ["user", "assistant", "tool", "user"]
+    assert out["messages"][2]["tool_call_id"] == "tool_1"
+    assert out["messages"][3]["content"] == "thanks, what about Y?"

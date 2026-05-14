@@ -102,9 +102,17 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
 
         try:
             if stream:
+                # Long SSE streams must not be cut by a read timeout; keep
+                # connect/write bounded but let reads block indefinitely.
+                stream_timeout = httpx.Timeout(
+                    connect=s.request_timeout,
+                    write=s.request_timeout,
+                    pool=s.request_timeout,
+                    read=None,
+                )
                 req = client.build_request(
                     "POST", url, json=openai_payload, headers=headers,
-                    timeout=s.request_timeout,
+                    timeout=stream_timeout,
                 )
                 upstream = await client.send(req, stream=True)
                 if upstream.status_code >= 400:
