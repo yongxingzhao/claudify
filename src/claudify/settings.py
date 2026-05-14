@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     )
 
     @classmethod
-    def load(cls, config_path: Path | None = None) -> "Settings":
+    def load(cls, config_path: Path | None = None) -> Settings:
         path = config_path or default_config_path()
         toml_data = _load_toml(path)
         return cls(**toml_data)
