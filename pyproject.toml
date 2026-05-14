@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claudify"
+version = "0.1.0"
+description = "Anthropic Messages API → OpenAI Chat Completions translation proxy"
+readme = "README.md"
+requires-python = ">=3.10,<4"
+license = "MIT"
+authors = [{ name = "Yongxing Zhao", email = "yongxingzhao@users.noreply.github.com" }]
+keywords = ["anthropic", "claude", "openai", "proxy", "api", "translation", "claude-code"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "fastapi>=0.110",
+    "httpx>=0.27",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "typer>=0.12",
+    "uvicorn>=0.27",
+]
+
+[project.urls]
+Source = "https://github.com/yongxingzhao/claudify"
+Issues = "https://github.com/yongxingzhao/claudify/issues"
+
+[project.scripts]
+claudify = "claudify.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claudify"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/claudify/py.typed" = "claudify/py.typed"
