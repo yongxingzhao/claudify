@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .conversion import (
     anthropic_to_openai,
+    extract_text_from_blocks,
     openai_to_anthropic_response,
     stream_openai_to_anthropic,
 )
@@ -76,6 +77,25 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
             "object": "list",
             "data": [{"id": m, "object": "model", "created": int(time.time()), "owned_by": "claudify"} for m in ids],
         }
+
+    @app.post("/v1/messages/count_tokens")
+    async def count_tokens(request: Request):
+        try:
+            payload = await request.json()
+        except Exception as e:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"type": "invalid_request_error", "message": f"invalid JSON: {e}"}},
+            )
+        chars = 0
+        sys = payload.get("system")
+        if isinstance(sys, str):
+            chars += len(sys)
+        elif isinstance(sys, list):
+            chars += len(extract_text_from_blocks(sys))
+        for msg in payload.get("messages", []) or []:
+            chars += len(extract_text_from_blocks(msg.get("content")))
+        return {"input_tokens": max(1, chars // 4)}
 
     @app.post("/v1/messages")
     async def messages(request: Request):

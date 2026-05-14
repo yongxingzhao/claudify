@@ -156,3 +156,59 @@ async def test_messages_invalid_json_400():
         r = await client.post("/v1/messages", content=b"{not json", headers={"content-type": "application/json"})
     assert r.status_code == 400
     assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_returns_estimate():
+    client, app = _client(lambda r: httpx.Response(500))
+    async with client, app.router.lifespan_context(app):
+        r = await client.post("/v1/messages/count_tokens", json={
+            "model": "claude-opus-4-7",
+            "system": "You are helpful.",
+            "messages": [{"role": "user", "content": "hello world"}],
+        })
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body["input_tokens"], int)
+    assert body["input_tokens"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_invalid_json_400():
+    client, app = _client(lambda r: httpx.Response(500))
+    async with client, app.router.lifespan_context(app):
+        r = await client.post(
+            "/v1/messages/count_tokens",
+            content=b"nope",
+            headers={"content-type": "application/json"},
+        )
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_streaming_request_uses_unbounded_read_timeout():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["timeout"] = request.extensions.get("timeout")
+        body = (
+            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    client, app = _client(handler)
+    async with app.router.lifespan_context(app):
+        async with client:
+            async with client.stream("POST", "/v1/messages", json={
+                "model": "claude-opus-4-7",
+                "stream": True,
+                "messages": [{"role": "user", "content": "x"}],
+            }) as r:
+                async for _ in r.aiter_raw():
+                    pass
+
+    # httpx surfaces per-request timeouts via request.extensions["timeout"];
+    # streaming must disable read timeout while keeping connect/write bounded.
+    assert captured["timeout"]["read"] is None
+    assert captured["timeout"]["connect"] is not None
