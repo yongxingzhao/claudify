@@ -21,26 +21,22 @@ from .conversion import (
     openai_to_anthropic_response,
     stream_openai_to_anthropic,
 )
+from .conversion import _sse
 from .settings import Settings
 
-# Upstream HTTP status -> Anthropic error type. (#14 — full table lands in batch 3,
-# but we already give 5xx a sane default here.)
 _RETRYABLE_STATUS = {502, 503, 504}
 
 
-# ---------- Metrics (#5) -----------------------------------------------------
+# ---------- Metrics -----------------------------------------------------------
 
-# Lightweight in-process counters/histogram. Exposed via /metrics in Prometheus
-# text format. Not a substitute for a real registry, but adequate for a single
-# proxy process and avoids an extra dependency.
 _LATENCY_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
 
 
 class _Metrics:
     def __init__(self) -> None:
-        self.requests_total: dict[tuple[str, str, str], int] = {}  # (method, route, status_class) -> count
-        self.upstream_total: dict[tuple[str, str], int] = {}  # (route, status_class) -> count
-        self.latency_buckets: dict[str, list[int]] = {}  # route -> [bucket_counts...] + [+Inf]
+        self.requests_total: dict[tuple[str, str, str], int] = {}
+        self.upstream_total: dict[tuple[str, str], int] = {}
+        self.latency_buckets: dict[str, list[int]] = {}
         self.latency_sum: dict[str, float] = {}
         self.latency_count: dict[str, int] = {}
 
@@ -52,7 +48,7 @@ class _Metrics:
         for i, b in enumerate(_LATENCY_BUCKETS):
             if latency_s <= b:
                 buckets[i] += 1
-        buckets[-1] += 1  # +Inf
+        buckets[-1] += 1
         self.latency_sum[route] = self.latency_sum.get(route, 0.0) + latency_s
         self.latency_count[route] = self.latency_count.get(route, 0) + 1
 
@@ -89,49 +85,51 @@ class _Metrics:
         return "\n".join(lines) + "\n"
 
 
-# ---------- Error passthrough -----------------------------------------------
+# ---------- Error mapping ----------------------------------------------------
+
+_HTTP_TO_ANTHROPIC_ERROR = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    429: "rate_limit_error",
+    500: "api_error",
+    502: "upstream_unavailable",
+    503: "overloaded_error",
+    504: "upstream_unavailable",
+}
 
 
 def _passthrough_error(body: bytes, status_code: int) -> dict:
-    """Translate an upstream error body into an Anthropic-shaped error dict."""
+    """Translate an upstream error into an Anthropic-shaped error response."""
     text = body.decode("utf-8", errors="replace") if body else ""
     try:
         parsed = _json.loads(text)
     except Exception:
         parsed = None
 
+    error_type = _HTTP_TO_ANTHROPIC_ERROR.get(status_code, "api_error")
+    message = f"http {status_code}"
+
     if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
         err = dict(parsed["error"])
-        err.setdefault("type", "upstream_error")
-        return {"error": err, "upstream_status": status_code}
+        err.setdefault("type", error_type)
+        err.setdefault("message", err.get("message", message))
+        return {"error": err}
     if isinstance(parsed, dict):
-        return {
-            "error": {"type": "upstream_error", "message": "upstream error"},
-            "upstream_status": status_code,
-            "upstream_body": parsed,
-        }
-    return {
-        "error": {"type": "upstream_error", "message": text[:2000] or f"http {status_code}"},
-        "upstream_status": status_code,
-    }
+        msg = parsed.get("message") or parsed.get("error") or message
+        if isinstance(msg, str):
+            message = msg
+        return {"error": {"type": error_type, "message": str(message)[:2000]}}
+    if text:
+        message = text[:2000]
+    return {"error": {"type": error_type, "message": message}}
 
 
-# ---------- Synthetic SSE close (#8) ----------------------------------------
-
-
-def _sse(event: str, data: dict) -> bytes:
-    return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n".encode()
+# ---------- Synthetic SSE close -----------------------------------------------
 
 
 def _synthetic_stop_events(reason: str = "end_turn") -> list[bytes]:
-    """Emit message_delta + message_stop so Anthropic clients can exit cleanly
-    when the upstream stream dies mid-flight.
-
-    Note: callers may have already opened content blocks; we don't try to close
-    them here because we don't track block index from outside the stream
-    converter. Clients tolerate trailing message_delta/message_stop without a
-    matching content_block_stop — and a hard close is strictly worse.
-    """
     return [
         _sse(
             "message_delta",
@@ -145,7 +143,7 @@ def _synthetic_stop_events(reason: str = "end_turn") -> list[bytes]:
     ]
 
 
-# ---------- Retry (#6) ------------------------------------------------------
+# ---------- Retry -------------------------------------------------------------
 
 
 async def _post_with_retry(
@@ -158,17 +156,11 @@ async def _post_with_retry(
     attempts: int,
     backoff: float,
 ) -> httpx.Response:
-    """POST with bounded exponential-backoff retry on 502/503/504 and connect/read errors.
-
-    `attempts` is the number of retries on top of the initial request, so total
-    requests = attempts + 1. attempts=0 (default) means no retry.
-    """
     last_exc: Exception | None = None
     for i in range(attempts + 1):
         try:
             resp = await client.post(url, json=json, headers=headers, timeout=timeout)
             if resp.status_code in _RETRYABLE_STATUS and i < attempts:
-                # Drain body so the connection can be reused.
                 await resp.aread()
                 await resp.aclose()
                 await _sleep_backoff(backoff, i)
@@ -180,19 +172,17 @@ async def _post_with_retry(
                 await _sleep_backoff(backoff, i)
                 continue
             raise
-    # Unreachable: either we returned a response or re-raised.
     assert last_exc is not None
     raise last_exc
 
 
 async def _sleep_backoff(base: float, attempt: int) -> None:
     delay = base * (2**attempt)
-    # Decorrelated jitter to avoid thundering herd.
     delay = random.uniform(base, max(base, delay))
     await asyncio.sleep(delay)
 
 
-# ---------- App factory ------------------------------------------------------
+# ---------- App factory -------------------------------------------------------
 
 
 def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClient | None = None) -> FastAPI:
@@ -215,9 +205,18 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
                 await app.state.http.aclose()
 
     app = FastAPI(title="claudify", version="0.1.0", lifespan=lifespan)
-    app.state.metrics = metrics
 
-    # ---------- Middleware: request_id + structured log + metrics (#4, #5) ----
+    # Reject oversized request bodies.
+    @app.middleware("http")
+    async def limit_body_size(request: Request, call_next: Callable[[Request], Awaitable[Response]]):
+        if request.method == "POST" and s.max_body_size > 0:
+            cl = int(request.headers.get("content-length", "0"))
+            if cl > s.max_body_size:
+                return JSONResponse(
+                    status_code=413,
+                    content={"error": {"type": "invalid_request_error", "message": f"request body too large ({cl} bytes, limit {s.max_body_size})"}},
+                )
+        return await call_next(request)
 
     @app.middleware("http")
     async def observability(request: Request, call_next: Callable[[Request], Awaitable[Response]]):
@@ -312,6 +311,11 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
             "Content-Type": "application/json",
             "Accept": "text/event-stream" if stream else "application/json",
         }
+        # Pass through Anthropic-specific headers that backends may need.
+        for hname in ("anthropic-beta", "anthropic-version"):
+            val = request.headers.get(hname)
+            if val:
+                headers[hname] = val
         if s.api_key:
             headers["Authorization"] = f"Bearer {s.api_key}"
         if rid:
@@ -343,7 +347,7 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
                 async def relay():
                     upstream_failed = False
                     try:
-                        async for chunk in stream_openai_to_anthropic(upstream.aiter_lines(), original_model):
+                        async for chunk in stream_openai_to_anthropic(upstream.aiter_bytes(), original_model):
                             yield chunk
                     except (httpx.HTTPError, asyncio.CancelledError) as e:
                         upstream_failed = True

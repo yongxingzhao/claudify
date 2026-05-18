@@ -43,8 +43,11 @@ def _system_to_openai(system: Any) -> str:
         return ""
     parts: list[str] = []
     for block in system:
-        if isinstance(block, dict) and block.get("type") == "text":
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
             parts.append(block.get("text", ""))
+        # cache_control is Anthropic-specific; silently ignore.
     return "\n".join(p for p in parts if p)
 
 
@@ -65,6 +68,8 @@ def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
+        # cache_control is Anthropic-specific; strip silently.
+        block.pop("cache_control", None)
         if btype == "text":
             parts.append({"type": "text", "text": block.get("text", "")})
         elif btype == "image":
@@ -125,7 +130,10 @@ def _assistant_content_to_openai(content: Any) -> tuple[str, list[dict[str, Any]
                 }
             )
         elif btype == "thinking":
-            pass
+            # Anthropic extended thinking; OpenAI has no equivalent.
+            # Drop silently — clients that request thinking will not receive it back
+            # through the OpenAI backend, but the request still succeeds.
+            log.debug("dropping thinking block (%d chars)", len(block.get("thinking", "")))
     return "\n".join(p for p in text_parts if p), tool_calls
 
 
@@ -205,10 +213,6 @@ def anthropic_to_openai(
         content = msg.get("content")
         if role == "user":
             user_content, tool_msgs = _user_content_to_openai(content)
-            # OpenAI requires {role:tool} messages to immediately follow the
-            # assistant turn whose tool_calls produced them — no user message
-            # may sit between. Anthropic allows mixing tool_result and text in
-            # one user turn, so we emit tools first, then any user text.
             out_messages.extend(tool_msgs)
             if user_content not in ("", []):
                 out_messages.append({"role": "user", "content": user_content})
@@ -217,7 +221,6 @@ def anthropic_to_openai(
             entry: dict[str, Any] = {"role": "assistant", "content": text or None}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
-            # Skip empty assistant turns
             if entry["content"] is None and not tool_calls:
                 continue
             out_messages.append(entry)
@@ -238,6 +241,10 @@ def anthropic_to_openai(
     if "stop_sequences" in payload:
         openai_payload["stop"] = payload["stop_sequences"]
 
+    # top_k is not part of OpenAI spec, but some backends support it via extra params.
+    if "top_k" in payload:
+        openai_payload["top_k"] = payload["top_k"]
+
     tools = _convert_tools(payload.get("tools"))
     if tools:
         openai_payload["tools"] = tools
@@ -250,7 +257,6 @@ def anthropic_to_openai(
         openai_payload["user"] = str(metadata["user_id"])
 
     if openai_payload["stream"]:
-        # Ask compatible backends to include final usage on the last chunk.
         openai_payload["stream_options"] = {"include_usage": True}
 
     return openai_payload
@@ -294,7 +300,7 @@ def openai_to_anthropic_response(openai_resp: dict[str, Any], original_model: st
             }
         )
 
-    return {
+    result: dict[str, Any] = {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
         "role": "assistant",
@@ -308,13 +314,20 @@ def openai_to_anthropic_response(openai_resp: dict[str, Any], original_model: st
         },
     }
 
+    # Map OpenAI user field back to Anthropic metadata.user_id.
+    user = openai_resp.get("user")
+    if user:
+        result["metadata"] = {"user_id": user}
+
+    return result
+
 
 def _sse(event: str, data: dict[str, Any]) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, separators=(',',':'))}\n\n".encode()
 
 
 async def stream_openai_to_anthropic(
-    openai_lines: AsyncIterator[bytes],
+    openai_stream: AsyncIterator[bytes],
     original_model: str,
 ) -> AsyncIterator[bytes]:
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
@@ -341,111 +354,124 @@ async def stream_openai_to_anthropic(
     text_block_open = False
     text_block_index = 0
     next_index = 0
-    # Map upstream tool_call index → our SSE block index + accumulated args
     tool_state: dict[int, dict[str, Any]] = {}
 
+    # Buffer for reassembling SSE events from byte chunks.
+    buf = ""
+
     try:
-        async for raw in openai_lines:
+        async for raw in openai_stream:
             if isinstance(raw, bytes):
-                line = raw.decode("utf-8", errors="replace")
+                chunk_text = raw.decode("utf-8", errors="replace")
             else:
-                line = raw
-            line = line.strip()
-            if not line.startswith("data:"):
-                continue
-            body = line[5:].strip()
-            if body == "[DONE]":
-                break
-            try:
-                chunk = json.loads(body)
-            except json.JSONDecodeError:
-                continue
+                chunk_text = raw
+            buf += chunk_text
+            # SSE events are delimited by blank lines (\n\n).
+            # Also handle line-by-line input (each line is its own event).
+            while True:
+                if "\n\n" in buf:
+                    event_text, buf = buf.split("\n\n", 1)
+                elif buf.startswith("data:") and buf.endswith("\n"):
+                    # Single line without trailing blank line — treat as one event
+                    event_text = buf.rstrip("\n")
+                    buf = ""
+                else:
+                    break
+                for line in event_text.split("\n"):
+                    if not line.startswith("data:"):
+                        continue
+                    body = line[5:].strip()
+                    if body == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(body)
+                    except json.JSONDecodeError:
+                        continue
 
-            if isinstance(chunk.get("usage"), dict):
-                upstream_usage = chunk["usage"]
+                    if isinstance(chunk.get("usage"), dict):
+                        upstream_usage = chunk["usage"]
 
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            choice0 = choices[0]
-            delta = choice0.get("delta") or {}
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice0 = choices[0]
+                    delta = choice0.get("delta") or {}
 
-            piece = delta.get("content")
-            if piece:
-                if not text_block_open:
-                    yield _sse(
-                        "content_block_start",
-                        {
-                            "type": "content_block_start",
-                            "index": next_index,
-                            "content_block": {"type": "text", "text": ""},
-                        },
-                    )
-                    text_block_open = True
-                    text_block_index = next_index
-                    next_index += 1
-                yield _sse(
-                    "content_block_delta",
-                    {
-                        "type": "content_block_delta",
-                        "index": text_block_index,
-                        "delta": {"type": "text_delta", "text": piece},
-                    },
-                )
-
-            for tc in delta.get("tool_calls") or []:
-                if not isinstance(tc, dict):
-                    continue
-                up_idx = tc.get("index", 0)
-                state = tool_state.get(up_idx)
-                if state is None:
-                    # Close text block before opening tool_use block
-                    if text_block_open:
+                    piece = delta.get("content")
+                    if piece:
+                        if not text_block_open:
+                            yield _sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": next_index,
+                                    "content_block": {"type": "text", "text": ""},
+                                },
+                            )
+                            text_block_open = True
+                            text_block_index = next_index
+                            next_index += 1
                         yield _sse(
-                            "content_block_stop",
+                            "content_block_delta",
                             {
-                                "type": "content_block_stop",
+                                "type": "content_block_delta",
                                 "index": text_block_index,
+                                "delta": {"type": "text_delta", "text": piece},
                             },
                         )
-                        text_block_open = False
-                    fn = tc.get("function") or {}
-                    state = {
-                        "block_index": next_index,
-                        "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
-                        "name": fn.get("name", ""),
-                        "args": "",
-                    }
-                    tool_state[up_idx] = state
-                    next_index += 1
-                    yield _sse(
-                        "content_block_start",
-                        {
-                            "type": "content_block_start",
-                            "index": state["block_index"],
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": state["id"],
-                                "name": state["name"],
-                                "input": {},
-                            },
-                        },
-                    )
-                fn = tc.get("function") or {}
-                args_piece = fn.get("arguments", "")
-                if args_piece:
-                    state["args"] += args_piece
-                    yield _sse(
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": state["block_index"],
-                            "delta": {"type": "input_json_delta", "partial_json": args_piece},
-                        },
-                    )
 
-            if choice0.get("finish_reason"):
-                finish_reason = choice0["finish_reason"]
+                    for tc in delta.get("tool_calls") or []:
+                        if not isinstance(tc, dict):
+                            continue
+                        up_idx = tc.get("index", 0)
+                        state = tool_state.get(up_idx)
+                        if state is None:
+                            if text_block_open:
+                                yield _sse(
+                                    "content_block_stop",
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": text_block_index,
+                                    },
+                                )
+                                text_block_open = False
+                            fn = tc.get("function") or {}
+                            state = {
+                                "block_index": next_index,
+                                "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
+                                "name": fn.get("name", ""),
+                                "args": "",
+                            }
+                            tool_state[up_idx] = state
+                            next_index += 1
+                            yield _sse(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": state["block_index"],
+                                    "content_block": {
+                                        "type": "tool_use",
+                                        "id": state["id"],
+                                        "name": state["name"],
+                                        "input": {},
+                                    },
+                                },
+                            )
+                        fn = tc.get("function") or {}
+                        args_piece = fn.get("arguments", "")
+                        if args_piece:
+                            state["args"] += args_piece
+                            yield _sse(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": state["block_index"],
+                                    "delta": {"type": "input_json_delta", "partial_json": args_piece},
+                                },
+                            )
+
+                    if choice0.get("finish_reason"):
+                        finish_reason = choice0["finish_reason"]
     except Exception:
         log.exception("stream relay error")
         finish_reason = "stop"

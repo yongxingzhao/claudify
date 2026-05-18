@@ -25,21 +25,28 @@ def config_path() -> None:
 
 @app.command("init-config")
 def init_config(
-    backend: str = typer.Option("http://127.0.0.1:8000/v1"),
-    api_key: str = typer.Option(""),
-    port: int = typer.Option(4000),
-    host: str = typer.Option("127.0.0.1"),
+    backend: str = typer.Option("", help="Backend base URL (default from Settings)"),
+    api_key: str = typer.Option("", help="API key (default from Settings)"),
+    port: int = typer.Option(0, help="Listen port (default from Settings)"),
+    host: str = typer.Option("", help="Listen host (default from Settings)"),
 ) -> None:
+    # Derive defaults from Settings so they stay in sync.
+    defaults = Settings()
+    be = backend or defaults.backend_base
+    ak = api_key or defaults.api_key
+    h = host or defaults.host
+    p = port or defaults.port
+
     path = default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         typer.echo(f"refused: {path} already exists")
         raise typer.Exit(code=1)
     path.write_text(
-        f'backend_base = "{backend}"\n'
-        f'api_key = "{api_key}"\n'
-        f'host = "{host}"\n'
-        f"port = {port}\n\n"
+        f'backend_base = "{be}"\n'
+        f'api_key = "{ak}"\n'
+        f'host = "{h}"\n'
+        f"port = {p}\n\n"
         f"# [model_map]\n"
         f'# "claude-opus-4-7" = "hermes-agent"\n\n'
         f'# default_model = "hermes-agent"\n',
@@ -60,7 +67,13 @@ def run(
     typer.echo(f"claudify v{__version__} → http://{h}:{p}, forwarding to {s.backend_base}")
     from .app import create_app
 
-    uvicorn.run(create_app(s), host=h, port=p, log_level=s.log_level.lower())
+    uvicorn.run(
+        create_app(s),
+        host=h,
+        port=p,
+        log_level=s.log_level.lower(),
+        timeout_graceful_shutdown=5,
+    )
 
 
 @app.command("install-service")

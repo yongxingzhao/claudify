@@ -236,7 +236,7 @@ def test_synthetic_stop_events_well_formed():
         assert ev.endswith(b"\n\n")
     # message_delta carries stop_reason
     delta_line = [line for line in events[0].split(b"\n") if line.startswith(b"data: ")][0]
-    payload = json.loads(delta_line[len(b"data: ") :])
+    payload = json.loads(delta_line[len(b"data: "):])
     assert payload["delta"]["stop_reason"] == "end_turn"
 
 
@@ -265,3 +265,31 @@ def test_settings_httpx_timeout_per_phase_overrides():
     assert t.read == 20.0
     assert t.write == 3.0
     assert t.pool == 4.0
+
+
+# ---------- body size limit -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_body_size_limit_rejects_oversized():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    upstream = httpx.AsyncClient(transport=transport)
+    s = _settings(max_body_size=100)  # 100 bytes limit
+    app = create_app(s, http_client=upstream)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+
+    async with client, app.router.lifespan_context(app):
+        big_body = {"model": "x", "messages": [{"role": "user", "content": "x" * 200}]}
+        r = await client.post("/v1/messages", json=big_body)
+        assert r.status_code == 413
+        assert r.json()["error"]["type"] == "invalid_request_error"
+        assert "too large" in r.json()["error"]["message"]

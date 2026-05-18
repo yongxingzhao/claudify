@@ -223,6 +223,69 @@ def test_openai_to_anthropic_response_tool_calls():
     ]
 
 
+def test_openai_to_anthropic_response_maps_user_to_metadata():
+    resp = {
+        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        "user": "user-123",
+    }
+    out = openai_to_anthropic_response(resp, "x")
+    assert out["metadata"] == {"user_id": "user-123"}
+
+
+def test_anthropic_to_openai_cache_control_stripped():
+    payload = {
+        "model": "x",
+        "system": [
+            {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}},
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}},
+                ],
+            }
+        ],
+    }
+    out = anthropic_to_openai(payload, {})
+    # System text is preserved, cache_control silently stripped
+    assert out["messages"][0] == {"role": "system", "content": "sys"}
+    # User content has no cache_control
+    user_msg = [m for m in out["messages"] if m["role"] == "user"][0]
+    assert user_msg["content"] == "hi"
+
+
+def test_anthropic_to_openai_top_k_passthrough():
+    payload = {
+        "model": "x",
+        "messages": [{"role": "user", "content": "hi"}],
+        "top_k": 40,
+    }
+    out = anthropic_to_openai(payload, {})
+    assert out["top_k"] == 40
+
+
+def test_anthropic_to_openai_thinking_block_dropped():
+    payload = {
+        "model": "x",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "let me think..."},
+                    {"type": "text", "text": "answer"},
+                ],
+            },
+            {"role": "user", "content": "ok"},
+        ],
+    }
+    out = anthropic_to_openai(payload, {})
+    assistant_msg = [m for m in out["messages"] if m["role"] == "assistant"][0]
+    # thinking block is dropped, only text preserved
+    assert assistant_msg["content"] == "answer"
+
+
 async def _gather(agen):
     return [chunk async for chunk in agen]
 
@@ -276,16 +339,12 @@ async def test_stream_handles_upstream_exception_gracefully():
 
     chunks = await _gather(stream_openai_to_anthropic(bad_lines(), "x"))
     text = b"".join(chunks).decode()
-    # Must still close blocks and emit message_stop
     assert "event: content_block_stop" in text
     assert "event: message_delta" in text
     assert "event: message_stop" in text
 
 
 def test_anthropic_to_openai_tool_result_precedes_user_text_in_same_turn():
-    # Anthropic lets a single user turn carry both tool_result and new text;
-    # OpenAI requires {role:tool} to immediately follow the assistant tool_call,
-    # so tool messages must be emitted BEFORE any user text from that turn.
     payload = {
         "model": "x",
         "messages": [
@@ -307,8 +366,6 @@ def test_anthropic_to_openai_tool_result_precedes_user_text_in_same_turn():
     }
     out = anthropic_to_openai(payload, {})
     roles = [m["role"] for m in out["messages"]]
-    # The tool message must sit directly after the assistant turn,
-    # with the user text following it.
     assert roles == ["user", "assistant", "tool", "user"]
     assert out["messages"][2]["tool_call_id"] == "tool_1"
     assert out["messages"][3]["content"] == "thanks, what about Y?"

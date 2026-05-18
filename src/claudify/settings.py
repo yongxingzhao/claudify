@@ -36,20 +36,17 @@ class Settings(BaseSettings):
     port: int = Field(default=4000)
     log_level: str = Field(default="INFO")
 
-    # Overall fallback. If a specific connect/read/write timeout is unset (None),
-    # it falls back to this value. Read timeout for streaming responses is always
-    # disabled (None) regardless of these settings — long SSE must not be cut.
     request_timeout: float = Field(default=300.0)
     connect_timeout: float | None = Field(default=None)
     read_timeout: float | None = Field(default=None)
     write_timeout: float | None = Field(default=None)
     pool_timeout: float | None = Field(default=None)
 
-    # Retry policy for upstream POST /chat/completions. Off by default so default
-    # behavior matches the previous release. Only retries on 502/503/504 and
-    # connect/read errors. Backoff is exponential with jitter.
     retry_attempts: int = Field(default=0, ge=0, le=10)
     retry_backoff: float = Field(default=0.5, ge=0.0)
+
+    # Max request body size in bytes. Requests exceeding this are rejected with 413.
+    max_body_size: int = Field(default=10 * 1024 * 1024, ge=0)  # 10 MB
 
     model_map: dict[str, str] = Field(default_factory=dict)
     default_model: str = Field(default="")
@@ -61,11 +58,6 @@ class Settings(BaseSettings):
     )
 
     def httpx_timeout(self, *, streaming: bool = False) -> httpx.Timeout:
-        """Build an httpx.Timeout from per-phase settings.
-
-        For streaming requests we force read=None so long SSE bodies are never
-        cut off by the read timeout.
-        """
         connect = self.connect_timeout if self.connect_timeout is not None else self.request_timeout
         read = self.read_timeout if self.read_timeout is not None else self.request_timeout
         write = self.write_timeout if self.write_timeout is not None else self.request_timeout
