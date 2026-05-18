@@ -65,18 +65,24 @@ def run(
 
 @app.command("install-service")
 def install_service(
-    backend: str = typer.Option(...),
-    api_key: str = typer.Option(...),
-    host: str = typer.Option("127.0.0.1"),
-    port: int = typer.Option(4000),
+    backend: str = typer.Option("", help="Override backend_base from config"),
+    api_key: str = typer.Option("", help="Override api_key from config"),
+    host: str = typer.Option("", help="Override host from config"),
+    port: int = typer.Option(0, help="Override port from config"),
 ) -> None:
     import platform
+
+    s = Settings.load()
+    be = backend or s.backend_base
+    ak = api_key or s.api_key
+    h = host or s.host
+    p = port or s.port
 
     cfg = default_config_path()
     cfg.parent.mkdir(parents=True, exist_ok=True)
     if not cfg.exists():
         cfg.write_text(
-            f'backend_base = "{backend}"\napi_key = "{api_key}"\nhost = "{host}"\nport = {port}\n',
+            f'backend_base = "{be}"\napi_key = "{ak}"\nhost = "{h}"\nport = {p}\n',
             encoding="utf-8",
         )
         os.chmod(cfg, 0o600)
