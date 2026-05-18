@@ -11,8 +11,10 @@ from claudify.app import create_app
 from claudify.settings import Settings
 
 
-def _settings(**over):
-    base = dict(
+def _client(handler):
+    transport = httpx.MockTransport(handler)
+    upstream = httpx.AsyncClient(transport=transport)
+    s = Settings(
         backend_base="http://upstream/v1",
         api_key="sk-test",
         host="127.0.0.1",
@@ -22,20 +24,13 @@ def _settings(**over):
         model_map={"claude-opus-4-7": "hermes-agent"},
         default_model="",
     )
-    base.update(over)
-    return Settings(**base)
-
-
-def _client(handler):
-    transport = httpx.MockTransport(handler)
-    upstream = httpx.AsyncClient(transport=transport)
-    app = create_app(_settings(), http_client=upstream)
+    app = create_app(s, http_client=upstream)
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver"), app
 
 
 @pytest.mark.asyncio
-async def test_health():
-    client, app = _client(lambda r: httpx.Response(500))
+async def test_health(make_client, noop_handler):
+    client, app = make_client(noop_handler)
     async with client, app.router.lifespan_context(app):
         r = await client.get("/health")
         assert r.status_code == 200
@@ -43,8 +38,8 @@ async def test_health():
 
 
 @pytest.mark.asyncio
-async def test_models_lists_known_ids():
-    client, app = _client(lambda r: httpx.Response(500))
+async def test_models_lists_known_ids(make_client, noop_handler):
+    client, app = make_client(noop_handler)
     async with client, app.router.lifespan_context(app):
         r = await client.get("/v1/models")
         ids = [m["id"] for m in r.json()["data"]]
@@ -52,7 +47,7 @@ async def test_models_lists_known_ids():
 
 
 @pytest.mark.asyncio
-async def test_messages_non_streaming_round_trip():
+async def test_messages_non_streaming_round_trip(make_client):
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -67,7 +62,7 @@ async def test_messages_non_streaming_round_trip():
             },
         )
 
-    client, app = _client(handler)
+    client, app = make_client(handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages",
@@ -89,13 +84,13 @@ async def test_messages_non_streaming_round_trip():
 
 
 @pytest.mark.asyncio
-async def test_messages_upstream_error_maps_to_anthropic_type():
+async def test_messages_upstream_error_maps_to_anthropic_type(make_client):
     upstream_err = {"error": {"type": "rate_limit_error", "message": "slow down"}}
 
     def handler(request):
         return httpx.Response(429, json=upstream_err)
 
-    client, app = _client(handler)
+    client, app = make_client(handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages",
@@ -109,17 +104,16 @@ async def test_messages_upstream_error_maps_to_anthropic_type():
     body = r.json()
     assert body["error"]["type"] == "rate_limit_error"
     assert body["error"]["message"] == "slow down"
-    # No upstream_status leaked to client
     assert "upstream_status" not in body
     assert "upstream_body" not in body
 
 
 @pytest.mark.asyncio
-async def test_messages_upstream_error_maps_unknown_status():
+async def test_messages_upstream_error_maps_unknown_status(make_client):
     def handler(request):
         return httpx.Response(418, content=b"I am a teapot")
 
-    client, app = _client(handler)
+    client, app = make_client(handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages",
@@ -134,11 +128,11 @@ async def test_messages_upstream_error_maps_unknown_status():
 
 
 @pytest.mark.asyncio
-async def test_messages_upstream_unavailable_returns_502():
+async def test_messages_upstream_unavailable_returns_502(make_client):
     def handler(request):
         raise httpx.ConnectError("nope", request=request)
 
-    client, app = _client(handler)
+    client, app = make_client(handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages",
@@ -153,7 +147,7 @@ async def test_messages_upstream_unavailable_returns_502():
 
 
 @pytest.mark.asyncio
-async def test_messages_streaming_relays_anthropic_events():
+async def test_messages_streaming_relays_anthropic_events(make_client):
     sse_body = (
         b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
         b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
@@ -163,7 +157,7 @@ async def test_messages_streaming_relays_anthropic_events():
     def handler(request):
         return httpx.Response(200, content=sse_body, headers={"content-type": "text/event-stream"})
 
-    client, app = _client(handler)
+    client, app = make_client(handler)
     async with app.router.lifespan_context(app):
         async with client:
             async with client.stream(
@@ -185,8 +179,8 @@ async def test_messages_streaming_relays_anthropic_events():
 
 
 @pytest.mark.asyncio
-async def test_messages_invalid_json_400():
-    client, app = _client(lambda r: httpx.Response(500))
+async def test_messages_invalid_json_400(make_client, noop_handler):
+    client, app = make_client(noop_handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages", content=b"{not json", headers={"content-type": "application/json"}
@@ -196,8 +190,8 @@ async def test_messages_invalid_json_400():
 
 
 @pytest.mark.asyncio
-async def test_count_tokens_returns_estimate():
-    client, app = _client(lambda r: httpx.Response(500))
+async def test_count_tokens_returns_estimate(make_client, noop_handler):
+    client, app = make_client(noop_handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages/count_tokens",
@@ -214,8 +208,8 @@ async def test_count_tokens_returns_estimate():
 
 
 @pytest.mark.asyncio
-async def test_count_tokens_invalid_json_400():
-    client, app = _client(lambda r: httpx.Response(500))
+async def test_count_tokens_invalid_json_400(make_client, noop_handler):
+    client, app = make_client(noop_handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages/count_tokens",
@@ -226,7 +220,7 @@ async def test_count_tokens_invalid_json_400():
 
 
 @pytest.mark.asyncio
-async def test_streaming_request_uses_unbounded_read_timeout():
+async def test_streaming_request_uses_unbounded_read_timeout(make_client):
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -234,7 +228,7 @@ async def test_streaming_request_uses_unbounded_read_timeout():
         body = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
         return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
-    client, app = _client(handler)
+    client, app = make_client(handler)
     async with app.router.lifespan_context(app):
         async with client:
             async with client.stream(
@@ -254,16 +248,7 @@ async def test_streaming_request_uses_unbounded_read_timeout():
 
 
 @pytest.mark.asyncio
-async def test_body_size_limit_rejects_oversized():
-    client, app = _client(lambda r: httpx.Response(200, json={"ok": True}))
-    async with client, app.router.lifespan_context(app):
-        # Default max_body_size is 10MB; a small setting for testing.
-        # We need to create a new app with a small limit.
-        pass  # Tested via unit test below
-
-
-@pytest.mark.asyncio
-async def test_anthropic_beta_header_forwarded():
+async def test_anthropic_beta_header_forwarded(make_client):
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -276,7 +261,7 @@ async def test_anthropic_beta_header_forwarded():
             },
         )
 
-    client, app = _client(handler)
+    client, app = make_client(handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages",

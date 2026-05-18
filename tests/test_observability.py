@@ -18,37 +18,12 @@ from claudify.app import _post_with_retry, _synthetic_stop_events, create_app
 from claudify.settings import Settings
 
 
-def _settings(**over) -> Settings:
-    base = dict(
-        backend_base="http://upstream/v1",
-        api_key="sk-test",
-        host="127.0.0.1",
-        port=4000,
-        log_level="WARNING",
-        request_timeout=10.0,
-        model_map={"claude-opus-4-7": "hermes-agent"},
-        default_model="",
-    )
-    base.update(over)
-    return Settings(**base)
-
-
-def _client(handler, **settings_over):
-    transport = httpx.MockTransport(handler)
-    upstream = httpx.AsyncClient(transport=transport)
-    app = create_app(_settings(**settings_over), http_client=upstream)
-    return (
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver"),
-        app,
-    )
-
-
 # ---------- request_id (#4) -------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_request_id_generated_when_missing():
-    client, app = _client(lambda r: httpx.Response(200, json={"status": "ok"}))
+async def test_request_id_generated_when_missing(make_client, noop_handler):
+    client, app = make_client(noop_handler)
     async with client, app.router.lifespan_context(app):
         r = await client.get("/health")
         assert r.status_code == 200
@@ -57,15 +32,15 @@ async def test_request_id_generated_when_missing():
 
 
 @pytest.mark.asyncio
-async def test_request_id_preserved_from_header():
-    client, app = _client(lambda r: httpx.Response(200, json={"status": "ok"}))
+async def test_request_id_preserved_from_header(make_client, noop_handler):
+    client, app = make_client(noop_handler)
     async with client, app.router.lifespan_context(app):
         r = await client.get("/health", headers={"x-request-id": "abc-123"})
         assert r.headers["x-request-id"] == "abc-123"
 
 
 @pytest.mark.asyncio
-async def test_request_id_forwarded_upstream():
+async def test_request_id_forwarded_upstream(make_client):
     seen: dict[str, str] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -80,7 +55,7 @@ async def test_request_id_forwarded_upstream():
             },
         )
 
-    client, app = _client(handler)
+    client, app = make_client(handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages",
@@ -95,8 +70,8 @@ async def test_request_id_forwarded_upstream():
 
 
 @pytest.mark.asyncio
-async def test_metrics_endpoint_renders_prometheus():
-    client, app = _client(lambda r: httpx.Response(200, json={"status": "ok"}))
+async def test_metrics_endpoint_renders_prometheus(make_client, noop_handler):
+    client, app = make_client(noop_handler)
     async with client, app.router.lifespan_context(app):
         await client.get("/health")
         await client.get("/health")
@@ -111,11 +86,11 @@ async def test_metrics_endpoint_renders_prometheus():
 
 
 @pytest.mark.asyncio
-async def test_metrics_records_upstream_status():
+async def test_metrics_records_upstream_status(make_client):
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"error": {"type": "service_unavailable"}})
 
-    client, app = _client(handler)
+    client, app = make_client(handler)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages",
@@ -179,14 +154,14 @@ async def test_post_with_retry_gives_up_after_attempts():
 
 
 @pytest.mark.asyncio
-async def test_retry_disabled_by_default():
+async def test_retry_disabled_by_default(make_client):
     calls = {"n": 0}
 
     def handler(req: httpx.Request) -> httpx.Response:
         calls["n"] += 1
         return httpx.Response(503, json={"error": "x"})
 
-    client, app = _client(handler)  # retry_attempts defaults to 0
+    client, app = make_client(handler)  # retry_attempts defaults to 0
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages",
@@ -197,7 +172,7 @@ async def test_retry_disabled_by_default():
 
 
 @pytest.mark.asyncio
-async def test_retry_engaged_via_settings():
+async def test_retry_engaged_via_settings(make_client):
     calls = {"n": 0}
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -214,7 +189,7 @@ async def test_retry_engaged_via_settings():
             },
         )
 
-    client, app = _client(handler, retry_attempts=2, retry_backoff=0.001)
+    client, app = make_client(handler, retry_attempts=2, retry_backoff=0.001)
     async with client, app.router.lifespan_context(app):
         r = await client.post(
             "/v1/messages",
@@ -234,7 +209,6 @@ def test_synthetic_stop_events_well_formed():
         assert ev.startswith(b"event: ")
         assert b"data: " in ev
         assert ev.endswith(b"\n\n")
-    # message_delta carries stop_reason
     delta_line = [line for line in events[0].split(b"\n") if line.startswith(b"data: ")][0]
     payload = json.loads(delta_line[len(b"data: "):])
     assert payload["delta"]["stop_reason"] == "end_turn"
@@ -244,7 +218,11 @@ def test_synthetic_stop_events_well_formed():
 
 
 def test_settings_httpx_timeout_uses_request_timeout_fallback():
-    s = _settings(request_timeout=12.0)
+    s = Settings(
+        backend_base="http://upstream/v1",
+        api_key="sk-test",
+        request_timeout=12.0,
+    )
     t = s.httpx_timeout()
     assert t.connect == 12.0
     assert t.read == 12.0
@@ -252,14 +230,26 @@ def test_settings_httpx_timeout_uses_request_timeout_fallback():
 
 
 def test_settings_httpx_timeout_streaming_disables_read():
-    s = _settings(request_timeout=12.0, read_timeout=5.0)
+    s = Settings(
+        backend_base="http://upstream/v1",
+        api_key="sk-test",
+        request_timeout=12.0,
+        read_timeout=5.0,
+    )
     t = s.httpx_timeout(streaming=True)
     assert t.connect == 12.0
-    assert t.read is None  # never cut a long SSE
+    assert t.read is None
 
 
 def test_settings_httpx_timeout_per_phase_overrides():
-    s = _settings(connect_timeout=2.0, read_timeout=20.0, write_timeout=3.0, pool_timeout=4.0)
+    s = Settings(
+        backend_base="http://upstream/v1",
+        api_key="sk-test",
+        connect_timeout=2.0,
+        read_timeout=20.0,
+        write_timeout=3.0,
+        pool_timeout=4.0,
+    )
     t = s.httpx_timeout()
     assert t.connect == 2.0
     assert t.read == 20.0
@@ -283,7 +273,11 @@ async def test_body_size_limit_rejects_oversized():
 
     transport = httpx.MockTransport(handler)
     upstream = httpx.AsyncClient(transport=transport)
-    s = _settings(max_body_size=100)  # 100 bytes limit
+    s = Settings(
+        backend_base="http://upstream/v1",
+        api_key="sk-test",
+        max_body_size=100,
+    )
     app = create_app(s, http_client=upstream)
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
 
