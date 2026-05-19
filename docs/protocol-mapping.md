@@ -1,97 +1,122 @@
 # Protocol Mapping: Anthropic ↔ OpenAI
 
-This document describes how Claudify translates between the Anthropic Messages API and the OpenAI Chat Completions API.
+This document describes how claudify translates between the Anthropic Messages API and the OpenAI Chat Completions API.
 
-## Message Roles
+## Request Translation (Anthropic → OpenAI)
 
-| Anthropic | OpenAI | Notes |
-|-----------|--------|-------|
-| `system` (string) | `role: "system"` | Direct mapping |
-| `system` (content blocks) | `role: "system"` | Blocks merged into single string; `cache_control` stripped |
-| `user` (string) | `role: "user"` | Direct mapping |
-| `user` (content blocks) | `role: "user"` | Text → text parts; Image → image_url; tool_result → separate `role: "tool"` messages |
-| `assistant` (string) | `role: "assistant"` | Direct mapping |
-| `assistant` (content blocks) | `role: "assistant"` | text → content; tool_use → tool_calls; thinking → dropped |
-
-## Content Block Types
-
-| Anthropic Block | OpenAI Equivalent | Notes |
-|-----------------|-------------------|-------|
-| `text` | `text` part | Direct |
-| `image` (base64) | `image_url` with data URI | `data:{media};base64,{data}` |
-| `image` (url) | `image_url` with URL | Direct |
-| `tool_use` | `tool_calls[]` entry | `input` → JSON `arguments` string |
-| `tool_result` | Separate `role: "tool"` message | Content extracted as text; `is_error` → `[tool_error]` prefix |
-| `thinking` | Dropped | Logged at debug level |
-| `cache_control` | Dropped | Stripped from all blocks |
-
-## Parameters
+### Top-Level Fields
 
 | Anthropic | OpenAI | Notes |
 |-----------|--------|-------|
-| `model` | `model` | Mapped via `model_map` or `default_model` |
-| `max_tokens` | `max_tokens` | Direct |
-| `temperature` | `temperature` | Direct |
-| `top_p` | `top_p` | Direct |
-| `top_k` | `top_k` | Passthrough (not all OpenAI backends support) |
-| `stop_sequences` | `stop` | Renamed |
-| `stream` | `stream` | Direct; `stream_options: {include_usage: true}` added |
-| `tools` | `tools` | `input_schema` → `parameters` |
-| `tool_choice` | `tool_choice` | `auto`→`auto`, `any`→`required`, named→`{type:"function",...}` |
-| `metadata.user_id` | `user` | Flattened |
+| `model` | `model` | Mapped through `model_map` if configured, then `default_model`, else passed through |
+| `messages` | `messages` | See message block mapping below |
+| `system` | `messages[0].role="system"` | Extracted to a system message |
+| `max_tokens` | `max_tokens` | Direct mapping |
+| `temperature` | `temperature` | Direct mapping |
+| `top_p` | `top_p` | Direct mapping |
+| `top_k` | `top_k` | Passed through (not standard OpenAI; supported by some backends) |
+| `stream` | `stream` | Direct mapping |
+| `stop_sequences` | `stop` | Direct mapping |
+| `tools` | `tools` | See tool mapping below |
+| `tool_choice` | `tool_choice` | See tool choice mapping below |
+| `metadata.user_id` | `user` | Mapped to OpenAI user field |
 
-## Stop Reasons
+### Message Block Mapping
 
-| OpenAI `finish_reason` | Anthropic `stop_reason` |
-|------------------------|------------------------|
+| Anthropic Block | OpenAI Format | Notes |
+|-----------------|---------------|-------|
+| `type: "text"` | `type: "text"` | Direct mapping |
+| `type: "image"` (base64) | `type: "image_url"` with `url: "data:..."` | Base64 → data URI |
+| `type: "image"` (URL) | `type: "image_url"` with `url: "..."` | Direct URL passthrough |
+| `type: "tool_use"` | `tool_calls[{function:{name,arguments}}]` | Arguments: JSON string |
+| `type: "tool_result"` | `role: "tool"` with `tool_call_id` | Mapped to tool message |
+| `type: "thinking"` | Dropped | Stripped with debug log; not mappable to OpenAI |
+| `cache_control` | Dropped | Silently stripped from all blocks |
+
+### Tool Definition Mapping
+
+| Anthropic | OpenAI | Notes |
+|-----------|--------|-------|
+| `name` | `function.name` | |
+| `description` | `function.description` | |
+| `input_schema` | `function.parameters` | Direct mapping (JSON Schema) |
+
+### Tool Choice Mapping
+
+| Anthropic | OpenAI | Notes |
+|-----------|--------|-------|
+| `{"type": "auto"}` | `{"type": "auto"}` | Direct mapping |
+| `{"type": "none"}` | `{"type": "none"}` | Direct mapping |
+| `{"type": "any"}` | `{"type": "required"}` | Best-effort mapping |
+| `{"type": "tool", "name": "X"}` | `{"type": "function", "function": {"name": "X"}}` | Named tool |
+
+## Response Translation (OpenAI → Anthropic)
+
+### Non-Streaming
+
+| OpenAI | Anthropic | Notes |
+|--------|-----------|-------|
+| `choices[0].message` | `content[]` | See content mapping below |
+| `choices[0].finish_reason` | `stop_reason` | See finish reason mapping |
+| `usage.prompt_tokens` | `usage.input_tokens` | |
+| `usage.completion_tokens` | `usage.output_tokens` | |
+| `model` | `model` | Reverse-mapped through model_map if possible |
+| `id` | `id` | Prefixed with `msg_` if not already |
+
+### Finish Reason Mapping
+
+| OpenAI | Anthropic |
+|--------|-----------|
 | `stop` | `end_turn` |
 | `length` | `max_tokens` |
 | `tool_calls` | `tool_use` |
+| Any other | `end_turn` |
 
-## Error Mapping
+### Content Mapping
 
-| HTTP Status | Anthropic Error Type |
-|-------------|---------------------|
-| 400 | `invalid_request_error` |
-| 401 | `authentication_error` |
-| 403 | `permission_error` |
-| 404 | `not_found_error` |
-| 429 | `rate_limit_error` |
-| 500 | `api_error` |
-| 502 | `api_error` |
-| 503 | `overloaded_error` |
-| 504 | `api_error` |
+| OpenAI | Anthropic | Notes |
+|--------|-----------|-------|
+| `content` (string) | `[{type: "text", text: ...}]` | Wrapped in text block |
+| `tool_calls[]` | `[{type: "tool_use", ...}]` | Arguments: JSON string → dict |
+| Empty content + tool_calls | `[{type: "text", text: ""}]` | Preserved |
 
-Upstream error messages are sanitized: API keys (`sk-...`) and URLs are redacted.
+### Streaming
+
+| OpenAI SSE Event | Anthropic SSE Event | Notes |
+|-------------------|---------------------|-------|
+| `role: "assistant"` delta | `message_start` | First chunk with role |
+| `content` delta | `content_block_delta` (text_delta) | Text streaming |
+| `tool_calls` delta | `content_block_delta` (input_json_delta) | Tool call streaming |
+| `finish_reason` | `message_delta` + `message_stop` | End of stream |
+| `usage` (last chunk) | `message_delta` (usage) | Token counts |
+| `[DONE]` | End of stream | Triggers `message_stop` |
+
+### Error Mapping
+
+| Upstream Status | Anthropic Error Type | Notes |
+|----------------|---------------------|-------|
+| 400 | `invalid_request_error` | |
+| 401 | `authentication_error` | |
+| 403 | `permission_error` | |
+| 404 | `not_found_error` | |
+| 429 | `rate_limit_error` | |
+| 500 | `api_error` | |
+| 502/503/504 | `upstream_unavailable` | Retried if configured |
+
+Error messages are sanitized to remove API keys and internal URLs before being returned to the client.
 
 ## Headers
 
-| Header | Behavior |
-|--------|----------|
-| `x-api-key` | Converted to `Authorization: Bearer ...` for upstream |
-| `Authorization` | Passed through as-is |
-| `anthropic-beta` | Forwarded to upstream |
-| `anthropic-version` | Forwarded; defaults to `2023-06-01` if absent |
-
-## Streaming Protocol
-
-Claudify translates OpenAI SSE chunks into Anthropic SSE events:
-
-1. `message_start` — sent at beginning with empty message scaffold
-2. `content_block_start` — when a new text or tool_use block begins
-3. `content_block_delta` — incremental text (`text_delta`) or tool arguments (`input_json_delta`)
-4. `content_block_stop` — when a block ends
-5. `message_delta` — final stop reason + usage
-6. `message_stop` — end of message
-7. `ping` — sent after each upstream chunk batch for keep-alive
-
-If the upstream stream is interrupted, Claudify emits synthetic `message_delta` + `message_stop` events to ensure the client receives a complete message.
+| Header | Direction | Notes |
+|--------|-----------|-------|
+| `x-api-key` | Inbound → `Authorization: Bearer` | Anthropic-style auth converted |
+| `anthropic-version` | Forwarded to upstream | Defaults to `2023-06-01` |
+| `anthropic-beta` | Forwarded to upstream | Pass-through |
+| `x-request-id` | Added to response | UUID4 per request |
 
 ## Known Unsupported Features
 
-- **Thinking/extended thinking**: Blocks are dropped (no `thinking` content in response)
-- **Cache control**: `cache_control` fields are stripped; no prompt caching
-- **Vision with multiple images**: Supported but may be slow on some backends
-- **Count tokens**: Returns char/word-based estimate, not real tokenization
-- **Citations**: Not mapped
-- **PDF/document attachments**: Not supported
+- **Extended thinking**: `thinking` blocks are stripped (no OpenAI equivalent)
+- **Prompt caching**: `cache_control` is silently removed
+- **Parallel tool calls**: Anthropic `tool_choice: {"type": "any"}` maps to OpenAI `"required"` (not exact)
+- **Image URL download**: Only base64 and direct URL passthrough
