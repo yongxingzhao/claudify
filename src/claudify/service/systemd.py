@@ -16,7 +16,7 @@ def install(host: str, port: int, backend_base: str, api_key: str) -> None:
     if backend_base:
         env_lines.append(f"CLAUDIFY_BACKEND_BASE={backend_base}")
     if api_key:
-        env_lines.append(f"CLAUDIFY_API_KEY={api_key}")
+        env_lines.append("CLAUDIFY_API_KEY=" + api_key)
     env_section = ""
     if env_lines:
         env_section = "Environment=" + " ".join(env_lines) + "\n"
