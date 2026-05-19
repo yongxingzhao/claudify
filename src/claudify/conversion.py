@@ -1,4 +1,4 @@
-"""Pure functions for Anthropic \u2194 OpenAI protocol conversion."""
+"""Pure functions for Anthropic <-> OpenAI protocol conversion."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
+
+from claudify.sse import STOP_REASON_MAP, sse_event, sse_ping, synthetic_stop_events
 
 log = logging.getLogger("claudify.conversion")
 
@@ -250,9 +252,6 @@ def anthropic_to_openai(
     return openai_payload
 
 
-_STOP_REASON_MAP = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
-
-
 def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
     if not arguments:
         return {}
@@ -294,7 +293,7 @@ def openai_to_anthropic_response(openai_resp: dict[str, Any], original_model: st
         "role": "assistant",
         "model": original_model,
         "content": content,
-        "stop_reason": _STOP_REASON_MAP.get(finish, "end_turn"),
+        "stop_reason": STOP_REASON_MAP.get(finish, "end_turn"),
         "stop_sequence": None,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0) or 0,
@@ -309,21 +308,13 @@ def openai_to_anthropic_response(openai_resp: dict[str, Any], original_model: st
     return result
 
 
-def _sse(event: str, data: dict[str, Any]) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, separators=(',',':'))}\n\n".encode()
-
-
-def _sse_ping() -> bytes:
-    return b"event: ping\ndata: {}\n\n"
-
-
 async def stream_openai_to_anthropic(
     openai_stream: AsyncIterator[bytes],
     original_model: str,
 ) -> AsyncIterator[bytes]:
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
 
-    yield _sse(
+    yield sse_event(
         "message_start",
         {
             "type": "message_start",
@@ -387,7 +378,7 @@ async def stream_openai_to_anthropic(
                     piece = delta.get("content")
                     if piece is not None:
                         if not text_block_open:
-                            yield _sse(
+                            yield sse_event(
                                 "content_block_start",
                                 {
                                     "type": "content_block_start",
@@ -398,7 +389,7 @@ async def stream_openai_to_anthropic(
                             text_block_open = True
                             text_block_index = next_index
                             next_index += 1
-                        yield _sse(
+                        yield sse_event(
                             "content_block_delta",
                             {
                                 "type": "content_block_delta",
@@ -414,7 +405,7 @@ async def stream_openai_to_anthropic(
                         state = tool_state.get(up_idx)
                         if state is None:
                             if text_block_open:
-                                yield _sse(
+                                yield sse_event(
                                     "content_block_stop",
                                     {
                                         "type": "content_block_stop",
@@ -431,7 +422,7 @@ async def stream_openai_to_anthropic(
                             }
                             tool_state[up_idx] = state
                             next_index += 1
-                            yield _sse(
+                            yield sse_event(
                                 "content_block_start",
                                 {
                                     "type": "content_block_start",
@@ -448,7 +439,7 @@ async def stream_openai_to_anthropic(
                         args_piece = fn.get("arguments", "")
                         if args_piece:
                             state["args"] += args_piece
-                            yield _sse(
+                            yield sse_event(
                                 "content_block_delta",
                                 {
                                     "type": "content_block_delta",
@@ -460,37 +451,37 @@ async def stream_openai_to_anthropic(
                     if choice0.get("finish_reason"):
                         finish_reason = choice0["finish_reason"]
 
-            yield _sse_ping()
+            yield sse_ping()
 
     except Exception:
         if text_block_open:
-            yield _sse(
+            yield sse_event(
                 "content_block_stop",
                 {"type": "content_block_stop", "index": text_block_index},
             )
-        for _ev in _synthetic_stop_events(finish_reason, upstream_usage):
-                yield _ev
+        for _ev in synthetic_stop_events(finish_reason, upstream_usage):
+            yield _ev
         return
 
     if text_block_open:
-        yield _sse(
+        yield sse_event(
             "content_block_stop",
             {"type": "content_block_stop", "index": text_block_index},
         )
     for state in tool_state.values():
-        yield _sse(
+        yield sse_event(
             "content_block_stop",
             {"type": "content_block_stop", "index": state["block_index"]},
         )
 
-    stop_reason = _STOP_REASON_MAP.get(finish_reason, "end_turn")
+    stop_reason = STOP_REASON_MAP.get(finish_reason, "end_turn")
     usage_out: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
     if upstream_usage:
         usage_out = {
             "input_tokens": upstream_usage.get("prompt_tokens", 0) or 0,
             "output_tokens": upstream_usage.get("completion_tokens", 0) or 0,
         }
-    yield _sse(
+    yield sse_event(
         "message_delta",
         {
             "type": "message_delta",
@@ -498,27 +489,4 @@ async def stream_openai_to_anthropic(
             "usage": usage_out,
         },
     )
-    yield _sse("message_stop", {"type": "message_stop"})
-
-
-def _synthetic_stop_events(
-    finish_reason: str, upstream_usage: dict[str, Any] | None
-) -> list[bytes]:
-    stop_reason = _STOP_REASON_MAP.get(finish_reason, "end_turn")
-    usage_out: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
-    if upstream_usage:
-        usage_out = {
-            "input_tokens": upstream_usage.get("prompt_tokens", 0) or 0,
-            "output_tokens": upstream_usage.get("completion_tokens", 0) or 0,
-        }
-    return [
-        _sse(
-            "message_delta",
-            {
-                "type": "message_delta",
-                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                "usage": usage_out,
-            },
-        ),
-        _sse("message_stop", {"type": "message_stop"}),
-    ]
+    yield sse_event("message_stop", {"type": "message_stop"})

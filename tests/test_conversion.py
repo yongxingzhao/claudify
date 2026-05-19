@@ -6,14 +6,12 @@ import json
 
 from claudify.conversion import (
     _convert_tool_choice,
-    _sse,
-    _sse_ping,
-    _synthetic_stop_events,
     anthropic_to_openai,
     extract_text_from_blocks,
     map_model,
     openai_to_anthropic_response,
 )
+from claudify.sse import sse_event, sse_ping, synthetic_stop_events
 
 
 def test_map_model_direct():
@@ -321,23 +319,23 @@ def test_extract_text_blocks():
     assert extract_text_from_blocks(blocks) == "a\nb"
 
 
-# ---------- _sse helpers ---------------------------------------------------
+# ---------- sse helpers ---------------------------------------------------
 
 
 def test_sse_format():
-    result = _sse("ping", {"type": "ping"})
+    result = sse_event("ping", {"type": "ping"})
     assert result.startswith(b"event: ping\n")
     assert b"data: " in result
     assert result.endswith(b"\n\n")
 
 
 def test_sse_ping():
-    result = _sse_ping()
+    result = sse_ping()
     assert result == b"event: ping\ndata: {}\n\n"
 
 
 def test_synthetic_stop_events():
-    events = _synthetic_stop_events("stop", {"prompt_tokens": 3, "completion_tokens": 5})
+    events = synthetic_stop_events("stop", {"prompt_tokens": 3, "completion_tokens": 5})
     assert len(events) == 2
     for ev in events:
         assert ev.startswith(b"event: ")
