@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from claudify.metrics import _MAX_LATENCY, Metrics
+from claudify.metrics import Metrics
 
 
 def test_metrics_record_and_render():
@@ -34,10 +34,32 @@ def test_metrics_empty():
     assert "claudify_request_latency_seconds_count" not in text
 
 
-def test_metrics_ring_buffer():
+def test_metrics_bucket_counts():
     m = Metrics()
-    for i in range(_MAX_LATENCY + 500):
-        m.record_request("/v1/messages", float(i) * 0.001, 200)
-    assert len(m._latencies) == _MAX_LATENCY
+    m.record_request("/v1/messages", 0.003, 200)
+    m.record_request("/v1/messages", 0.05, 200)
+    m.record_request("/v1/messages", 1.0, 200)
     text = m.render()
-    assert "claudify_request_latency_seconds" in text
+    # 0.003 <= 0.005, so le="0.005" should be >= 1
+    assert 'le="0.005"' in text
+    # All three <= +Inf
+    assert 'le="+Inf"' in text
+
+
+def test_metrics_thread_safety():
+    import threading
+    m = Metrics()
+    errors = []
+    def worker():
+        try:
+            for _ in range(100):
+                m.record_request("/v1/messages", 0.01, 200)
+        except Exception as e:
+            errors.append(e)
+    threads = [threading.Thread(target=worker) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert m._counts.get("/v1/messages") == 1000

@@ -11,11 +11,10 @@ def _plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / "com.claudify.plist"
 
 
-def install(host: str, port: int, backend_base: str, api_key: str) -> None:
+def install(host: str, port: int, backend_base: str) -> None:
     env_vars: dict[str, str] = {}
     if backend_base:
         env_vars["CLAUDIFY_BACKEND_BASE"] = backend_base
-    # api_key read from config.toml; not exposed in plist
 
     env_xml = ""
     for k, v in env_vars.items():

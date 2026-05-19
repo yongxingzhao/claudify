@@ -102,6 +102,48 @@ async def test_messages_body_too_large(make_client):
 
 
 @pytest.mark.anyio
+async def test_messages_must_be_list(make_client, chat_response):
+    def handler(r):
+        return httpx.Response(200, json=chat_response())
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": "not a list",
+    })
+    assert r.status_code == 400
+    assert "array" in r.json()["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_messages_role_required(make_client, chat_response):
+    def handler(r):
+        return httpx.Response(200, json=chat_response())
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"content": "no role field"}],
+    })
+    assert r.status_code == 400
+    assert "role" in r.json()["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_empty_messages_rejected(make_client, chat_response):
+    def handler(r):
+        return httpx.Response(200, json=chat_response())
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [],
+    })
+    assert r.status_code == 400
+    assert "empty" in r.json()["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_health(make_client):
     client, _ = make_client(lambda r: httpx.Response(200, json={}))
     r = await client.get("/health")
@@ -203,23 +245,9 @@ async def test_count_tokens_empty_messages(make_client):
 
 
 @pytest.mark.anyio
-async def test_empty_messages_rejected(make_client, chat_response):
-    def handler(r):
-        return httpx.Response(200, json=chat_response())
-    client, _ = make_client(handler)
-    r = await client.post("/v1/messages", json={
-        "model": "claude-opus-4-7",
-        "messages": [],
-    })
-    assert r.status_code == 400
-    assert "empty" in r.json()["error"]["message"]
-    await client.aclose()
-
-
-@pytest.mark.anyio
 async def test_error_message_sanitization(make_client):
     def handler(request):
-        return httpx.Response(500, json={"error": {"message": "Internal error at https://api.evil.com with ***"}})
+        return httpx.Response(500, json={"error": {"message": "key sk-abc123def leaked"}})
     client, _ = make_client(handler)
     r = await client.post("/v1/messages", json={
         "model": "claude-opus-4-7",
@@ -227,9 +255,8 @@ async def test_error_message_sanitization(make_client):
     })
     assert r.status_code == 500
     msg = r.json()["error"]["message"]
-    assert "https://api.evil.com" not in msg
-    # *** in original text is not a key, kept as-is
-    assert "redacted" in msg
+    assert "sk-abc123def" not in msg
+    assert "[REDACTED]" in msg
     await client.aclose()
 
 
@@ -299,19 +326,6 @@ async def test_x_api_key_forwarded(make_client, chat_response):
 
 
 @pytest.mark.anyio
-async def test_request_id_header(make_client, chat_response):
-    def handler(r):
-        return httpx.Response(200, json=chat_response(body="hi"))
-    client, _ = make_client(handler)
-    r = await client.post("/v1/messages", json={
-        "model": "claude-opus-4-7",
-        "messages": [{"role": "user", "content": "hi"}],
-    })
-    assert "x-request-id" in r.headers
-    await client.aclose()
-
-
-@pytest.mark.anyio
 async def test_retry_on_503(make_client, chat_response):
     call_count = 0
     def handler(request):
@@ -365,7 +379,7 @@ async def test_non_json_upstream_error(make_client):
     })
     assert r.status_code == 502
     data = r.json()
-    assert data["error"]["type"] == "api_error"
+    assert data["error"]["type"] == "upstream_unavailable"
     assert "502" in data["error"]["message"]
     await client.aclose()
 
@@ -381,4 +395,17 @@ async def test_upstream_error_type_override(make_client):
     })
     assert r.status_code == 429
     assert r.json()["error"]["type"] == "rate_limit_error"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_request_id_in_response(make_client, chat_response):
+    def handler(r):
+        return httpx.Response(200, json=chat_response(body="hi"))
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert "x-request-id" in r.headers
     await client.aclose()

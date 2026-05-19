@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -15,6 +16,15 @@ if sys.version_info >= (3, 11):
     import tomllib
 else:
     import tomli as tomllib  # type: ignore
+
+log = logging.getLogger("claudify.settings")
+
+_VALID_FIELDS = {
+    "backend_base", "api_key", "host", "port", "log_level",
+    "request_timeout", "connect_timeout", "read_timeout", "write_timeout", "pool_timeout",
+    "retry_attempts", "retry_backoff", "max_body_size",
+    "model_map", "default_model", "cors_origins", "upstream_health_path",
+}
 
 
 def default_config_path() -> Path:
@@ -73,4 +83,8 @@ class Settings(BaseSettings):
     def load(cls, config_path: Path | None = None) -> Settings:
         path = config_path or default_config_path()
         toml_data = _load_toml(path)
+        # Warn on unknown top-level keys
+        for key in toml_data:
+            if key not in _VALID_FIELDS:
+                log.warning("unknown config key in %s: %r", path, key)
         return cls(**toml_data)

@@ -1,4 +1,4 @@
-"""SSE (Server-Sent Events) helper functions for Anthropic streaming protocol."""
+"""SSE (Server-Sent Events) helpers for Anthropic streaming protocol."""
 
 from __future__ import annotations
 
@@ -24,6 +24,49 @@ def extract_usage(upstream_usage: dict[str, Any] | None) -> dict[str, Any]:
             "output_tokens": upstream_usage.get("completion_tokens", 0) or 0,
         }
     return {"input_tokens": 0, "output_tokens": 0}
+
+
+class SSEParser:
+    """Incremental SSE stream parser that handles chunk boundaries correctly."""
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._done = False
+
+    @property
+    def done(self) -> bool:
+        return self._done
+
+    def feed(self, raw: bytes | str) -> list[dict[str, Any]]:
+        """Feed raw bytes/string, return list of parsed SSE data dicts."""
+        if isinstance(raw, bytes):
+            chunk_text = raw.decode("utf-8", errors="replace")
+        else:
+            chunk_text = raw
+        self._buf += chunk_text
+        events: list[dict[str, Any]] = []
+        while True:
+            if "\n\n" in self._buf:
+                event_text, self._buf = self._buf.split("\n\n", 1)
+            elif self._buf.startswith("data:") and self._buf.endswith("\n"):
+                event_text = self._buf.rstrip("\n")
+                self._buf = ""
+            else:
+                break
+            for line in event_text.split("\n"):
+                if not line.startswith("data:"):
+                    continue
+                body = line[5:].strip()
+                if body == "[DONE]":
+                    self._done = True
+                    break
+                try:
+                    events.append(json.loads(body))
+                except json.JSONDecodeError:
+                    continue
+            if self._done:
+                break
+        return events
 
 
 def synthetic_stop_events(

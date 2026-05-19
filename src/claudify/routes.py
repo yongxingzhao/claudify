@@ -61,8 +61,18 @@ def _validate_messages_payload(body: bytes, settings: Settings) -> tuple[dict[st
         return None, make_error_response("invalid_request_error", "messages must be an array", 400)
     if not payload["messages"]:
         return None, make_error_response("invalid_request_error", "messages must not be empty", 400)
+    for i, msg in enumerate(payload["messages"]):
+        if not isinstance(msg, dict) or "role" not in msg:
+            return None, make_error_response("invalid_request_error", f"messages[{i}] must have a \"role\" field", 400)
 
     return payload, None
+
+
+def _add_request_id(response: Response, request: Request) -> Response:
+    rid = getattr(request.state, "request_id", "")
+    if rid:
+        response.headers["x-request-id"] = rid
+    return response
 
 
 async def messages(request: Request, client: httpx.AsyncClient, settings: Settings, metrics: Metrics) -> Response:
@@ -72,7 +82,7 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
     body = await request.body()
     payload, err = _validate_messages_payload(body, settings)
     if err:
-        return err
+        return _add_request_id(err, request)
 
     openai_payload = anthropic_to_openai(payload, settings.model_map, settings.default_model)
     is_stream = openai_payload.get("stream", False)
@@ -106,7 +116,8 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
                 finally:
                     await r.aclose()
 
-            return StreamingResponse(_generate(), media_type="text/event-stream")
+            resp = StreamingResponse(_generate(), media_type="text/event-stream")
+            return _add_request_id(resp, request)
         else:
             if settings.retry_attempts > 1:
                 r = await post_with_retry(client, req, settings.retry_attempts, settings.retry_backoff)
@@ -119,17 +130,23 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
         elapsed = time.monotonic() - t0
         metrics.record_request("/v1/messages", elapsed, exc.response.status_code)
         log.warning("rid=%s upstream %d", rid, exc.response.status_code)
-        return passthrough_error(exc.response.status_code, exc.response.content)
+        return _add_request_id(passthrough_error(exc.response.status_code, exc.response.content), request)
+    except httpx.TimeoutException as exc:
+        elapsed = time.monotonic() - t0
+        metrics.record_request("/v1/messages", elapsed, 504)
+        log.error("rid=%s upstream timeout: %s", rid, exc)
+        return _add_request_id(passthrough_error(504), request)
     except (httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
         elapsed = time.monotonic() - t0
         metrics.record_request("/v1/messages", elapsed, 502)
         log.error("rid=%s upstream unavailable: %s", rid, exc)
-        return passthrough_error(502)
+        return _add_request_id(passthrough_error(502), request)
 
     elapsed = time.monotonic() - t0
     metrics.record_request("/v1/messages", elapsed, r.status_code)
     result = openai_to_anthropic_response(data, payload.get("model", ""))
-    return Response(content=json.dumps(result), media_type="application/json")
+    resp = Response(content=json.dumps(result), media_type="application/json")
+    return _add_request_id(resp, request)
 
 
 async def list_models(settings: Settings) -> dict[str, Any]:
@@ -169,13 +186,14 @@ async def count_tokens(request: Request) -> Response:
     msgs = payload.get("messages", [])
     if not isinstance(msgs, list) or not msgs:
         return make_error_response("invalid_request_error", "messages must be a non-empty array", 400)
-    total_chars = sum(
-        len(m.get("content", "")) if isinstance(m.get("content"), str) else len(str(m.get("content", "")))
-        for m in msgs
-    )
-    total_words = sum(
-        len(m.get("content", "").split()) if isinstance(m.get("content"), str) else 0
-        for m in msgs
-    )
+    total_chars = 0
+    total_words = 0
+    for m in msgs:
+        c = m.get("content", "")
+        if isinstance(c, str):
+            total_chars += len(c)
+            total_words += len(c.split())
+        else:
+            total_chars += len(str(c))
     estimated = max(total_words, total_chars // 4)
     return Response(content=json.dumps({"input_tokens": estimated}), media_type="application/json")

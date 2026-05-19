@@ -11,11 +11,10 @@ def _unit_path() -> Path:
     return base / "claudify.service"
 
 
-def install(host: str, port: int, backend_base: str, api_key: str) -> None:
+def install(host: str, port: int, backend_base: str) -> None:
     env_lines = []
     if backend_base:
         env_lines.append(f"CLAUDIFY_BACKEND_BASE={backend_base}")
-    # api_key is read from config.toml at runtime; no need to expose in Environment=
     env_section = ""
     if env_lines:
         env_section = "Environment=" + " ".join(env_lines) + "\n"

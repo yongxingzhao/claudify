@@ -8,7 +8,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from claudify.sse import STOP_REASON_MAP, extract_usage, sse_event, sse_ping, synthetic_stop_events
+from claudify.sse import STOP_REASON_MAP, SSEParser, extract_usage, sse_event, sse_ping, synthetic_stop_events
 
 log = logging.getLogger("claudify.conversion")
 
@@ -44,11 +44,11 @@ def _system_to_openai(system: Any) -> str:
     if not isinstance(system, list):
         return ""
     parts: list[str] = []
-    for block in system:
-        if not isinstance(block, dict):
+    for item in system:
+        if not isinstance(item, dict):
             continue
-        if block.get("type") == "text":
-            parts.append(block.get("text", ""))
+        if item.get("type") == "text":
+            parts.append(item.get("text", ""))
     return "\n".join(p for p in parts if p)
 
 
@@ -64,16 +64,16 @@ def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
-        block = {k: v for k, v in block.items() if k != "cache_control"}
+        clean_block = {k: v for k, v in block.items() if k != "cache_control"}
         if btype == "text":
-            text = block.get("text", "")
+            text = clean_block.get("text", "")
             parts.append({"type": "text", "text": text})
         elif btype == "image":
-            part = _image_block_to_openai_part(block)
+            part = _image_block_to_openai_part(clean_block)
             if part:
                 parts.append(part)
         elif btype == "tool_result":
-            tc = block.get("content")
+            tc = clean_block.get("content")
             if isinstance(tc, str):
                 tool_text = tc
             elif isinstance(tc, list):
@@ -82,12 +82,12 @@ def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
                 )
             else:
                 tool_text = ""
-            if block.get("is_error"):
+            if clean_block.get("is_error"):
                 tool_text = f"[tool_error] {tool_text}".rstrip()
             tool_msgs.append(
                 {
                     "role": "tool",
-                    "tool_call_id": block.get("tool_use_id") or "",
+                    "tool_call_id": clean_block.get("tool_use_id") or "",
                     "content": tool_text,
                 }
             )
@@ -212,8 +212,9 @@ def anthropic_to_openai(
             entry: dict[str, Any] = {"role": "assistant", "content": text or None}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
+            # Keep messages even if content is empty and no tool_calls (state messages)
             if entry["content"] is None and not tool_calls:
-                continue
+                entry["content"] = ""
             out_messages.append(entry)
 
     has_user = any(m["role"] == "user" for m in out_messages)
@@ -337,126 +338,96 @@ async def stream_openai_to_anthropic(
     text_block_index = 0
     next_index = 0
     tool_state: dict[int, dict[str, Any]] = {}
-    done = False
 
-    buf = ""
+    parser = SSEParser()
 
     try:
         async for raw in openai_stream:
-            if done:
+            if parser.done:
                 break
-            if isinstance(raw, bytes):
-                chunk_text = raw.decode("utf-8", errors="replace")
-            else:
-                chunk_text = raw
-            buf += chunk_text
-            while True:
-                if "\n\n" in buf:
-                    event_text, buf = buf.split("\n\n", 1)
-                elif buf.startswith("data:") and buf.endswith("\n"):
-                    event_text = buf.rstrip("\n")
-                    buf = ""
-                else:
-                    break
-                for line in event_text.split("\n"):
-                    if not line.startswith("data:"):
-                        continue
-                    body = line[5:].strip()
-                    if body == "[DONE]":
-                        done = True
-                        break
-                    try:
-                        chunk = json.loads(body)
-                    except json.JSONDecodeError:
-                        continue
+            chunks = parser.feed(raw)
+            for chunk in chunks:
+                if isinstance(chunk.get("usage"), dict):
+                    upstream_usage = chunk["usage"]
 
-                    if isinstance(chunk.get("usage"), dict):
-                        upstream_usage = chunk["usage"]
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice0 = choices[0]
+                delta = choice0.get("delta") or {}
 
-                    choices = chunk.get("choices") or []
-                    if not choices:
+                piece = delta.get("content")
+                if piece is not None:
+                    if not text_block_open:
+                        yield sse_event(
+                            "content_block_start",
+                            {
+                                "type": "content_block_start",
+                                "index": next_index,
+                                "content_block": {"type": "text", "text": ""},
+                            },
+                        )
+                        text_block_open = True
+                        text_block_index = next_index
+                        next_index += 1
+                    yield sse_event(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": text_block_index,
+                            "delta": {"type": "text_delta", "text": piece},
+                        },
+                    )
+
+                for tc in delta.get("tool_calls") or []:
+                    if not isinstance(tc, dict):
                         continue
-                    choice0 = choices[0]
-                    delta = choice0.get("delta") or {}
-
-                    piece = delta.get("content")
-                    if piece is not None:
-                        if not text_block_open:
+                    up_idx = tc.get("index", 0)
+                    state = tool_state.get(up_idx)
+                    if state is None:
+                        if text_block_open:
                             yield sse_event(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": next_index,
-                                    "content_block": {"type": "text", "text": ""},
-                                },
+                                "content_block_stop",
+                                {"type": "content_block_stop", "index": text_block_index},
                             )
-                            text_block_open = True
-                            text_block_index = next_index
-                            next_index += 1
+                            text_block_open = False
+                        fn = tc.get("function") or {}
+                        state = {
+                            "block_index": next_index,
+                            "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
+                            "name": fn.get("name", ""),
+                            "args": "",
+                        }
+                        tool_state[up_idx] = state
+                        next_index += 1
+                        yield sse_event(
+                            "content_block_start",
+                            {
+                                "type": "content_block_start",
+                                "index": state["block_index"],
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": state["id"],
+                                    "name": state["name"],
+                                    "input": {},
+                                },
+                            },
+                        )
+                    fn = tc.get("function") or {}
+                    args_piece = fn.get("arguments", "")
+                    if args_piece:
+                        state["args"] += args_piece
                         yield sse_event(
                             "content_block_delta",
                             {
                                 "type": "content_block_delta",
-                                "index": text_block_index,
-                                "delta": {"type": "text_delta", "text": piece},
+                                "index": state["block_index"],
+                                "delta": {"type": "input_json_delta", "partial_json": args_piece},
                             },
                         )
 
-                    for tc in delta.get("tool_calls") or []:
-                        if not isinstance(tc, dict):
-                            continue
-                        up_idx = tc.get("index", 0)
-                        state = tool_state.get(up_idx)
-                        if state is None:
-                            if text_block_open:
-                                yield sse_event(
-                                    "content_block_stop",
-                                    {
-                                        "type": "content_block_stop",
-                                        "index": text_block_index,
-                                    },
-                                )
-                                text_block_open = False
-                            fn = tc.get("function") or {}
-                            state = {
-                                "block_index": next_index,
-                                "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
-                                "name": fn.get("name", ""),
-                                "args": "",
-                            }
-                            tool_state[up_idx] = state
-                            next_index += 1
-                            yield sse_event(
-                                "content_block_start",
-                                {
-                                    "type": "content_block_start",
-                                    "index": state["block_index"],
-                                    "content_block": {
-                                        "type": "tool_use",
-                                        "id": state["id"],
-                                        "name": state["name"],
-                                        "input": {},
-                                    },
-                                },
-                            )
-                        fn = tc.get("function") or {}
-                        args_piece = fn.get("arguments", "")
-                        if args_piece:
-                            state["args"] += args_piece
-                            yield sse_event(
-                                "content_block_delta",
-                                {
-                                    "type": "content_block_delta",
-                                    "index": state["block_index"],
-                                    "delta": {"type": "input_json_delta", "partial_json": args_piece},
-                                },
-                            )
-
-                    if choice0.get("finish_reason"):
-                        finish_reason = choice0["finish_reason"]
-
-                if done:
-                    break
+                if choice0.get("finish_reason"):
+                    finish_reason = choice0["finish_reason"]
 
             yield sse_ping()
 

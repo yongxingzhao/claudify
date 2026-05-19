@@ -229,7 +229,8 @@ def test_empty_string_content_preserved():
     }
     out = anthropic_to_openai(payload, {})
     assistant_msgs = [m for m in out["messages"] if m["role"] == "assistant"]
-    assert len(assistant_msgs) == 0
+    assert len(assistant_msgs) == 1
+    assert assistant_msgs[0]["content"] == ""
 
 
 # ---------- openai_to_anthropic_response ------------------------------------
