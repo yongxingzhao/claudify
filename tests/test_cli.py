@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import os
 from unittest.mock import patch
 
-import pytest
 from typer.testing import CliRunner
 
 from claudify.cli import app

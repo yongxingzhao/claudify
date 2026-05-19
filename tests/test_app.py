@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
-
-from claudify.app import create_app
-from claudify.settings import Settings
 
 
 def _chat_response(body="hi", finish="stop", model="m", usage=None):

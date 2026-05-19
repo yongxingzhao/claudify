@@ -14,15 +14,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
 from claudify.conversion import (
-    _sse,
     _synthetic_stop_events,
     anthropic_to_openai,
-    map_model,
     openai_to_anthropic_response,
     stream_openai_to_anthropic,
 )
@@ -76,7 +74,7 @@ class _Metrics:
         for route in sorted(by_route):
             lats = by_route[route]
             for b in buckets:
-                cnt = sum(1 for l in lats if l <= b)
+                cnt = sum(1 for lat in lats if lat <= b)
                 lines.append(f'claudify_request_latency_seconds_bucket{{le="{b}",route="{route}"}} {cnt}')
             lines.append(f'claudify_request_latency_seconds_bucket{{le="+Inf",route="{route}"}} {len(lats)}')
             total = sum(lats)
@@ -280,7 +278,6 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
                     r, retried = await _stream_with_retry(client, req, settings.retry_attempts, settings.retry_backoff)
                 else:
                     r = await client.send(req, stream=True)
-                    retried = False
                 r.raise_for_status()
 
                 async def _generate() -> AsyncIterator[bytes]:

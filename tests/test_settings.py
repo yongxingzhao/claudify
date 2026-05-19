@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
-import pytest
-
-from claudify.settings import Settings, default_config_path, _load_toml
+from claudify.settings import Settings, _load_toml
 
 
 def test_defaults():

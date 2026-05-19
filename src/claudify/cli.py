@@ -83,7 +83,8 @@ def install_service(
         typer.echo(f"wrote {cfg}")
 
     if platform.system() == "Darwin":
-        from claudify.service.launchd import install as ld_install, load_agent
+        from claudify.service.launchd import install as ld_install
+        from claudify.service.launchd import load_agent
         ld_install(h, p, be, ak)
         load_agent()
         typer.echo("LaunchAgent installed and loaded.")

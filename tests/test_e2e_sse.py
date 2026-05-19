@@ -7,9 +7,6 @@ import json
 import httpx
 import pytest
 
-from claudify.app import create_app
-from claudify.settings import Settings
-
 
 def _stream_chunks():
     def handler(request: httpx.Request) -> httpx.Response:

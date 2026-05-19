@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import httpx
-import pytest
-
-from claudify.app import create_app, _Metrics, _MAX_LATENCY
-from claudify.settings import Settings
+from claudify.app import _MAX_LATENCY, _Metrics
 
 
 def test_metrics_record_and_render():

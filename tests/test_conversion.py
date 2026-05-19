@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from claudify.conversion import (
     _convert_tool_choice,
     _sse,
