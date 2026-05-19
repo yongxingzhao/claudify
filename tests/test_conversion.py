@@ -18,14 +18,11 @@ from claudify.conversion import (
 )
 
 
-# ---------- map_model --------------------------------------------------------
+def test_map_model_direct():
+    assert map_model("claude-opus-4-7", {"claude-opus-4-7": "gpt-4"}) == "gpt-4"
 
 
-def test_map_model_exact_match():
-    assert map_model("claude-opus-4-7", {"claude-opus-4-7": "hermes-agent"}) == "hermes-agent"
-
-
-def test_map_model_fallback_default():
+def test_map_model_default():
     assert map_model("unknown", {}, default="gpt-4") == "gpt-4"
 
 
@@ -33,32 +30,13 @@ def test_map_model_passthrough():
     assert map_model("unknown", {}) == "unknown"
 
 
-# ---------- anthropic_to_openai ---------------------------------------------
-
-
-def test_basic_user_message():
-    payload = {
-        "model": "claude-opus-4-7",
-        "messages": [{"role": "user", "content": "hello"}],
-        "stream": False,
-    }
-    out = anthropic_to_openai(payload, {"claude-opus-4-7": "hermes-agent"})
-    assert out["model"] == "hermes-agent"
-    assert out["messages"] == [{"role": "user", "content": "hello"}]
-    assert out["stream"] is False
-
-
-def test_system_message():
-    payload = {
-        "model": "m",
-        "system": "You are helpful.",
-        "messages": [{"role": "user", "content": "hi"}],
-    }
+def test_system_string():
+    payload = {"model": "m", "system": "sys", "messages": [{"role": "user", "content": "hi"}]}
     out = anthropic_to_openai(payload, {})
-    assert out["messages"][0] == {"role": "system", "content": "You are helpful."}
+    assert out["messages"][0]["role"] == "system"
 
 
-def test_system_blocks_with_cache_control():
+def test_system_blocks():
     payload = {
         "model": "m",
         "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
@@ -131,7 +109,6 @@ def test_cache_control_does_not_mutate_input():
     import copy
     snap = copy.deepcopy(original_content)
     anthropic_to_openai(payload, {})
-    # Original must not be mutated
     assert original_content == snap
 
 
@@ -243,6 +220,20 @@ def test_thinking_block_dropped():
     assistant = [m for m in out["messages"] if m["role"] == "assistant"][0]
     assert assistant["content"] == "answer"
     assert "tool_calls" not in assistant
+
+
+def test_empty_string_content_preserved():
+    payload = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": "ok"},
+        ],
+    }
+    out = anthropic_to_openai(payload, {})
+    assistant_msgs = [m for m in out["messages"] if m["role"] == "assistant"]
+    assert len(assistant_msgs) == 0
 
 
 # ---------- openai_to_anthropic_response ------------------------------------

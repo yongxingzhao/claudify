@@ -62,10 +62,10 @@ def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
-        # Strip cache_control from a copy to avoid mutating the original payload
         block = {k: v for k, v in block.items() if k != "cache_control"}
         if btype == "text":
-            parts.append({"type": "text", "text": block.get("text", "")})
+            text = block.get("text", "")
+            parts.append({"type": "text", "text": text})
         elif btype == "image":
             part = _image_block_to_openai_part(block)
             if part:
@@ -385,7 +385,7 @@ async def stream_openai_to_anthropic(
                     delta = choice0.get("delta") or {}
 
                     piece = delta.get("content")
-                    if piece:
+                    if piece is not None:
                         if not text_block_open:
                             yield _sse(
                                 "content_block_start",
@@ -460,7 +460,6 @@ async def stream_openai_to_anthropic(
                     if choice0.get("finish_reason"):
                         finish_reason = choice0["finish_reason"]
 
-            # Forward ping to keep connection alive
             yield _sse_ping()
 
     except Exception:
@@ -491,7 +490,6 @@ async def stream_openai_to_anthropic(
             "input_tokens": upstream_usage.get("prompt_tokens", 0) or 0,
             "output_tokens": upstream_usage.get("completion_tokens", 0) or 0,
         }
-
     yield _sse(
         "message_delta",
         {
@@ -504,20 +502,23 @@ async def stream_openai_to_anthropic(
 
 
 def _synthetic_stop_events(
-    finish_reason: str = "stop",
-    upstream_usage: dict[str, Any] | None = None,
+    finish_reason: str, upstream_usage: dict[str, Any] | None
 ) -> list[bytes]:
     stop_reason = _STOP_REASON_MAP.get(finish_reason, "end_turn")
-    usage: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
+    usage_out: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
     if upstream_usage:
-        usage = {
+        usage_out = {
             "input_tokens": upstream_usage.get("prompt_tokens", 0) or 0,
             "output_tokens": upstream_usage.get("completion_tokens", 0) or 0,
         }
     return [
         _sse(
             "message_delta",
-            {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": usage},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                "usage": usage_out,
+            },
         ),
         _sse("message_stop", {"type": "message_stop"}),
     ]

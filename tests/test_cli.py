@@ -32,7 +32,9 @@ def test_init_config(tmp_path):
     assert r.exit_code == 0
     assert "wrote" in r.stdout
     assert cfg.exists()
-    assert os.chmod  # just check we got here
+    content = cfg.read_text()
+    assert "retry" in content
+    assert "timeout" in content
 
 
 def test_init_config_already_exists(tmp_path):
@@ -50,3 +52,4 @@ def test_run_help():
     assert r.exit_code == 0
     assert "--verbose" in r.stdout
     assert "--quiet" in r.stdout
+    assert "--config" in r.stdout

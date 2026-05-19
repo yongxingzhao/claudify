@@ -10,45 +10,39 @@ from claudify.settings import Settings
 
 
 @pytest.fixture
-def noop_handler():
-    return lambda req: httpx.Response(200, json={"status": "ok"})
-
-
-@pytest.fixture
 def make_client():
-    def _make(
+    """Return a factory that creates an httpx.AsyncClient wired to the FastAPI app,
+    with the upstream OpenAI backend replaced by *handler* (httpx.MockTransport)."""
+    def _factory(
         handler,
         *,
-        retry_attempts: int = 0,
-        retry_backoff: float = 0.5,
-        model_map: dict | None = None,
+        model_map: dict[str, str] | None = None,
         default_model: str = "",
         max_body_size: int = 10 * 1024 * 1024,
-        cors_origins: list | None = None,
+        retry_attempts: int = 0,
+        retry_backoff: float = 0.5,
+        cors_origins: list[str] | None = None,
         upstream_health_path: str = "",
-        **settings_overrides,
-    ):
-        base = dict(
-            backend_base="http://upstream/v1",
-            api_key="sk-test",
-            host="127.0.0.1",
-            port=4000,
-            log_level="WARNING",
-            request_timeout=10.0,
-            retry_attempts=retry_attempts,
-            retry_backoff=retry_backoff,
+    ) -> tuple[httpx.AsyncClient, Settings]:
+        s = Settings(
+            backend_base="http://test-backend/v1",
+            api_key="test-key",
             model_map=model_map if model_map is not None else {"claude-opus-4-7": "hermes-agent"},
             default_model=default_model,
             max_body_size=max_body_size,
+            retry_attempts=retry_attempts,
+            retry_backoff=retry_backoff,
             cors_origins=cors_origins or [],
             upstream_health_path=upstream_health_path,
         )
-        base.update(settings_overrides)
-        s = Settings(**base)
-        transport = httpx.MockTransport(handler)
-        upstream = httpx.AsyncClient(transport=transport)
-        app = create_app(s, http_client=upstream)
-        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
-        return client, app
-
-    return _make
+        mock_transport = httpx.MockTransport(handler)
+        mock_client = httpx.AsyncClient(
+            transport=mock_transport,
+            base_url=s.backend_base,
+            timeout=s.httpx_timeout(),
+        )
+        app = create_app(s, http_client=mock_client)
+        asgi_transport = httpx.ASGITransport(app=app)
+        client = httpx.AsyncClient(transport=asgi_transport, base_url="http://test")
+        return client, s
+    return _factory

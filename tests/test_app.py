@@ -164,6 +164,8 @@ async def test_list_models(make_client):
     assert data["object"] == "list"
     ids = [m["id"] for m in data["data"]]
     assert "claude-opus-4-7" in ids
+    assert "created" in data["data"][0]
+    assert "owned_by" in data["data"][0]
     await client.aclose()
 
 
@@ -210,7 +212,7 @@ async def test_count_tokens_invalid_json(make_client):
 @pytest.mark.anyio
 async def test_error_message_sanitization(make_client):
     def handler(request):
-        return httpx.Response(500, json={"error": {"message": "Internal error at https://api.evil.com with sk-abc123"}})
+        return httpx.Response(500, json={"error": {"message": "Internal error at https://api.evil.com with sk-abc123def456"}})
     client, _ = make_client(handler)
     r = await client.post("/v1/messages", json={
         "model": "claude-opus-4-7",
@@ -218,7 +220,7 @@ async def test_error_message_sanitization(make_client):
     })
     assert r.status_code == 500
     msg = r.json()["error"]["message"]
-    assert "sk-abc123" not in msg
+    assert "sk-abc123def456" not in msg
     assert "https://api.evil.com" not in msg
     assert "redacted" in msg
     await client.aclose()
@@ -256,6 +258,38 @@ async def test_anthropic_headers_forwarded(make_client):
 
 
 @pytest.mark.anyio
+async def test_anthropic_version_default(make_client):
+    captured = {}
+    def handler(request):
+        captured["anthropic_version"] = request.headers.get("anthropic-version")
+        return httpx.Response(200, json=_chat_response())
+    client, _ = make_client(handler)
+    await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert captured["anthropic_version"] == "2023-06-01"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_x_api_key_forwarded(make_client):
+    captured = {}
+    def handler(request):
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json=_chat_response())
+    client, _ = make_client(handler)
+    await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    }, headers={
+        "x-api-key": "sk-test-key-123",
+    })
+    assert captured["auth"] == "Bearer sk-test-key-123"
+    await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_request_id_header(make_client):
     client, _ = make_client(_handler("hi"))
     r = await client.post("/v1/messages", json={
@@ -282,4 +316,58 @@ async def test_retry_on_503(make_client):
     })
     assert r.status_code == 200
     assert call_count == 3
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_missing_model_field(make_client):
+    client, _ = make_client(_handler())
+    r = await client.post("/v1/messages", json={
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "invalid_request_error"
+    assert "model" in r.json()["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_missing_messages_field(make_client):
+    client, _ = make_client(_handler())
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+    })
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "invalid_request_error"
+    assert "messages" in r.json()["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_non_json_upstream_error(make_client):
+    def handler(request):
+        return httpx.Response(502, content=b"<html>Bad Gateway</html>", headers={"content-type": "text/html"})
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 502
+    data = r.json()
+    assert data["error"]["type"] == "api_error"
+    assert "502" in data["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_upstream_error_type_override(make_client):
+    def handler(request):
+        return httpx.Response(429, json={"error": {"type": "service_unavailable", "message": "slow down"}})
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 429
+    assert r.json()["error"]["type"] == "rate_limit_error"
     await client.aclose()
