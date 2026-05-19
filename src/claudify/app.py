@@ -33,8 +33,8 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
         app.add_middleware(
             CORSMiddleware,
             allow_origins=settings.cors_origins,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_methods=["POST", "GET", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "x-api-key", "anthropic-version", "anthropic-beta"],
         )
 
     @app.middleware("http")
@@ -47,9 +47,10 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
 
     client = http_client or httpx.AsyncClient(
         base_url=settings.backend_base,
-        timeout=settings.httpx_timeout(),
+        timeout=settings.httpx_timeout(streaming=True),
     )
     app.state.http_client = client
+    app.state.settings = settings
 
     @app.post("/v1/messages")
     async def _messages(request: Request) -> Response:

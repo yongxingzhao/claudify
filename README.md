@@ -13,7 +13,7 @@ A local proxy that translates the **Anthropic Messages API** into **OpenAI Chat 
 **Linux and macOS only.** Windows is not supported and not tested.
 
 - **Linux:** tested on systemd-based distros (Arch, Ubuntu, Fedora). `claudify install-service` writes a user-level systemd unit.
-- **macOS:** the package runs, but `claudify install-service` is currently a **stub** — it will exit with an error. You can still run `claudify run` manually or wrap it in your own launchd plist.
+- **macOS:** `claudify install-service` writes a LaunchAgent plist and loads it via `launchctl`.
 - **Windows:** untested. Use WSL2.
 
 ## Install
@@ -80,17 +80,18 @@ default_model = "hermes-agent"
 
 | Setting | Env var | Default | Notes |
 | --- | --- | --- | --- |
-| `backend_base` | `CLAUDIFY_BACKEND_BASE` | — | OpenAI-compatible base URL. |
-| `api_key` | `CLAUDIFY_API_KEY` | — | Bearer token sent upstream. |
+| `backend_base` | `CLAUDIFY_BACKEND_BASE` | `http://127.0.0.1:8000/v1` | OpenAI-compatible base URL. |
+| `api_key` | `CLAUDIFY_API_KEY` | _(empty)_ | Bearer token sent upstream. |
 | `host` | `CLAUDIFY_HOST` | `127.0.0.1` | Bind address. |
 | `port` | `CLAUDIFY_PORT` | `4000` | Bind port. |
-| `connect_timeout` | `CLAUDIFY_CONNECT_TIMEOUT` | `10.0` | Connection timeout (seconds). |
-| `read_timeout` | `CLAUDIFY_READ_TIMEOUT` | `120.0` | Read timeout for non-streaming. |
-| `write_timeout` | `CLAUDIFY_WRITE_TIMEOUT` | `10.0` | Write timeout. |
-| `pool_timeout` | `CLAUDIFY_POOL_TIMEOUT` | `5.0` | Connection pool timeout. |
+| `connect_timeout` | `CLAUDIFY_CONNECT_TIMEOUT` | _(same as request_timeout)_ | Connection timeout (seconds). |
+| `read_timeout` | `CLAUDIFY_READ_TIMEOUT` | _(same as request_timeout)_ | Read timeout for non-streaming. |
+| `write_timeout` | `CLAUDIFY_WRITE_TIMEOUT` | _(same as request_timeout)_ | Write timeout. |
+| `pool_timeout` | `CLAUDIFY_POOL_TIMEOUT` | _(same as request_timeout)_ | Connection pool timeout. |
+| `request_timeout` | `CLAUDIFY_REQUEST_TIMEOUT` | `300.0` | Fallback timeout for any unset timeout. |
 | `retry_attempts` | `CLAUDIFY_RETRY_ATTEMPTS` | `0` | Max retry attempts for 5xx errors. |
 | `retry_backoff` | `CLAUDIFY_RETRY_BACKOFF` | `0.5` | Initial backoff in seconds (doubles each attempt). |
-| `default_model` | `CLAUDIFY_DEFAULT_MODEL` | — | Used when the requested model is unknown. |
+| `default_model` | `CLAUDIFY_DEFAULT_MODEL` | _(empty)_ | Used when the requested model is unknown. |
 | `model_map` | (TOML only) | `{}` | Map Anthropic model names to upstream model names. |
 | `cors_origins` | (TOML only) | `[]` | Allowed CORS origins. |
 
@@ -110,8 +111,10 @@ See [docs/protocol-mapping.md](docs/protocol-mapping.md) for the full translatio
 claudify install-service --backend http://127.0.0.1:8000/v1 --api-key YOUR_KEY
 ```
 
-- **Linux (systemd, implemented):** writes `~/.config/systemd/user/claudify.service`, then `systemctl --user enable --now claudify`.
-- **macOS (launchd, stub):** not implemented yet. The command will exit with an error message.
+- **Linux (systemd):** writes `~/.config/systemd/user/claudify.service`, then `systemctl --user enable --now claudify`.
+- **macOS (launchd):** writes `~/Library/LaunchAgents/com.claudify.plist`, then loads via `launchctl`.
+
+Note: `api_key` is not written to the service file. Claudify reads it from `config.toml` at runtime.
 
 Inspect / control:
 
@@ -119,6 +122,9 @@ Inspect / control:
 # Linux
 systemctl --user status claudify
 journalctl --user -u claudify -f
+
+# macOS
+launchctl list | grep claudify
 ```
 
 ## Project layout
@@ -137,7 +143,7 @@ src/claudify/
 └── service/
     ├── __init__.py     # platform dispatch
     ├── systemd.py      # Linux user-unit installer
-    └── launchd.py      # macOS launchd installer (stub)
+    └── launchd.py      # macOS launchd installer
 ```
 
 ## Development

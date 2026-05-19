@@ -8,7 +8,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from claudify.sse import STOP_REASON_MAP, sse_event, sse_ping, synthetic_stop_events
+from claudify.sse import STOP_REASON_MAP, extract_usage, sse_event, sse_ping, synthetic_stop_events
 
 log = logging.getLogger("claudify.conversion")
 
@@ -337,11 +337,14 @@ async def stream_openai_to_anthropic(
     text_block_index = 0
     next_index = 0
     tool_state: dict[int, dict[str, Any]] = {}
+    done = False
 
     buf = ""
 
     try:
         async for raw in openai_stream:
+            if done:
+                break
             if isinstance(raw, bytes):
                 chunk_text = raw.decode("utf-8", errors="replace")
             else:
@@ -360,6 +363,7 @@ async def stream_openai_to_anthropic(
                         continue
                     body = line[5:].strip()
                     if body == "[DONE]":
+                        done = True
                         break
                     try:
                         chunk = json.loads(body)
@@ -451,6 +455,9 @@ async def stream_openai_to_anthropic(
                     if choice0.get("finish_reason"):
                         finish_reason = choice0["finish_reason"]
 
+                if done:
+                    break
+
             yield sse_ping()
 
     except Exception:
@@ -475,18 +482,12 @@ async def stream_openai_to_anthropic(
         )
 
     stop_reason = STOP_REASON_MAP.get(finish_reason, "end_turn")
-    usage_out: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
-    if upstream_usage:
-        usage_out = {
-            "input_tokens": upstream_usage.get("prompt_tokens", 0) or 0,
-            "output_tokens": upstream_usage.get("completion_tokens", 0) or 0,
-        }
     yield sse_event(
         "message_delta",
         {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": usage_out,
+            "usage": extract_usage(upstream_usage),
         },
     )
     yield sse_event("message_stop", {"type": "message_stop"})

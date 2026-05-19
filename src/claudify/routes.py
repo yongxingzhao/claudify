@@ -57,6 +57,8 @@ def _validate_messages_payload(body: bytes, settings: Settings) -> tuple[dict[st
         return None, make_error_response("invalid_request_error", "Missing required field: model", 400)
     if "messages" not in payload:
         return None, make_error_response("invalid_request_error", "Missing required field: messages", 400)
+    if not isinstance(payload["messages"], list):
+        return None, make_error_response("invalid_request_error", "messages must be an array", 400)
     if not payload["messages"]:
         return None, make_error_response("invalid_request_error", "messages must not be empty", 400)
 
@@ -131,14 +133,12 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
 
 
 async def list_models(settings: Settings) -> dict[str, Any]:
-    import time as _time
-
     ids = list(settings.model_map.keys())
     if settings.default_model and settings.default_model not in ids:
         ids.append(settings.default_model)
     if not ids:
         ids = ["default"]
-    now = int(_time.time())
+    now = int(time.time())
     return {
         "object": "list",
         "data": [{"id": m, "object": "model", "created": now, "owned_by": "claudify"} for m in ids],
@@ -167,8 +167,8 @@ async def count_tokens(request: Request) -> Response:
     except json.JSONDecodeError:
         return make_error_response("invalid_request_error", "Invalid JSON", 400)
     msgs = payload.get("messages", [])
-    if not msgs:
-        return make_error_response("invalid_request_error", "messages must not be empty", 400)
+    if not isinstance(msgs, list) or not msgs:
+        return make_error_response("invalid_request_error", "messages must be a non-empty array", 400)
     total_chars = sum(
         len(m.get("content", "")) if isinstance(m.get("content"), str) else len(str(m.get("content", "")))
         for m in msgs

@@ -15,8 +15,7 @@ def install(host: str, port: int, backend_base: str, api_key: str) -> None:
     env_lines = []
     if backend_base:
         env_lines.append(f"CLAUDIFY_BACKEND_BASE={backend_base}")
-    if api_key:
-        env_lines.append("CLAUDIFY_API_KEY=" + api_key)
+    # api_key is read from config.toml at runtime; no need to expose in Environment=
     env_section = ""
     if env_lines:
         env_section = "Environment=" + " ".join(env_lines) + "\n"
