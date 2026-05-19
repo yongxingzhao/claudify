@@ -53,6 +53,6 @@ def _strip_ansi(s: str) -> str:
 def test_run_help():
     r = runner.invoke(app, ["run", "--help"])
     assert r.exit_code == 0
-    assert "--verbose" in r.stdout
-    assert "--quiet" in r.stdout
-    assert "--config" in r.stdout
+    assert "--verbose" in _strip_ansi(r.stdout)
+    assert "--quiet" in _strip_ansi(r.stdout)
+    assert "--config" in _strip_ansi(r.stdout)
