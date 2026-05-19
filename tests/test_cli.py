@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -43,6 +44,10 @@ def test_init_config_already_exists(tmp_path):
         r = runner.invoke(app, ["init-config"])
     assert r.exit_code == 1
     assert "already exists" in r.output
+
+
+def _strip_ansi(s: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
 
 
 def test_run_help():
