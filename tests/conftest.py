@@ -46,3 +46,17 @@ def make_client():
         client = httpx.AsyncClient(transport=asgi_transport, base_url="http://test")
         return client, s
     return _factory
+
+
+@pytest.fixture
+def chat_response():
+    """Helper to build a standard OpenAI chat completion response."""
+    def _factory(body="hi", finish="stop", model="m", usage=None):
+        return {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": body}, "finish_reason": finish}],
+            "usage": usage or {"prompt_tokens": 5, "completion_tokens": 3},
+        }
+    return _factory

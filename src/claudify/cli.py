@@ -49,8 +49,12 @@ def init_config() -> None:
         f'# retry_attempts = 0\n'
         f'# retry_backoff = 0.5\n\n'
         f'# Model mapping: Anthropic name -> OpenAI name\n'
+        f'# Uncomment and edit to enable model routing\n'
         f'# [model_map]\n'
-        f'# "claude-opus-4-7" = "gpt-4"\n\n'
+        f'# "claude-opus-4-7" = "gpt-4"\n'
+        f'# "claude-sonnet-4-6" = "gpt-4o"\n\n'
+        f'# Default model when no mapping matches\n'
+        f'# default_model = "gpt-4o"\n\n'
         f'# CORS origins (for browser access)\n'
         f'# cors_origins = ["http://localhost:3000"]\n',
         encoding="utf-8",

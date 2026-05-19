@@ -17,6 +17,7 @@ def _chat_response(body="hi", finish="stop", model="m", usage=None):
 
 
 def _handler(body="hi", status=200, usage=None):
+    """Build a mock handler returning a standard chat response."""
     resp = _chat_response(body=body, usage=usage)
     def handler(request):
         return httpx.Response(status, json=resp)
@@ -205,6 +206,29 @@ async def test_count_tokens_invalid_json(make_client):
 
 
 @pytest.mark.anyio
+async def test_count_tokens_empty_messages(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    r = await client.post("/v1/messages/count_tokens", json={
+        "messages": [],
+    })
+    assert r.status_code == 400
+    assert "empty" in r.json()["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_empty_messages_rejected(make_client):
+    client, _ = make_client(_handler())
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [],
+    })
+    assert r.status_code == 400
+    assert "empty" in r.json()["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_error_message_sanitization(make_client):
     def handler(request):
         return httpx.Response(500, json={"error": {"message": "Internal error at https://api.evil.com with sk-abc123def456"}})
@@ -215,8 +239,8 @@ async def test_error_message_sanitization(make_client):
     })
     assert r.status_code == 500
     msg = r.json()["error"]["message"]
-    assert "sk-abc123def456" not in msg
     assert "https://api.evil.com" not in msg
+    assert "sk-abc123def456" not in msg
     assert "redacted" in msg
     await client.aclose()
 
@@ -278,9 +302,9 @@ async def test_x_api_key_forwarded(make_client):
         "model": "claude-opus-4-7",
         "messages": [{"role": "user", "content": "hi"}],
     }, headers={
-        "x-api-key": "sk-test-key-123",
+        "x-api-key": "sk-test-12345678",
     })
-    assert captured["auth"] == "Bearer sk-test-key-123"
+    assert captured["auth"] == "Bearer sk-test-12345678"
     await client.aclose()
 
 

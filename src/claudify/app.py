@@ -65,12 +65,6 @@ class _Metrics:
         by_route: dict[str, list[float]] = {}
         for lat, route in self._latencies:
             by_route.setdefault(route, []).append(lat)
-        if not by_route and self._counts:
-            for route in sorted(self._counts):
-                lines.append(f'claudify_request_latency_seconds_count{{route="{route}"}} 0')
-        if not by_route and self._counts:
-            for route in sorted(self._counts):
-                lines.append(f'claudify_request_latency_seconds_count{{route="{route}"}} 0')
         for route in sorted(by_route):
             lats = by_route[route]
             for b in buckets:
@@ -137,10 +131,12 @@ async def _stream_with_retry(
                 return r, attempt > 0
             if attempt < attempts - 1:
                 await r.aclose()
+                log.warning("stream retry %d/%d after status %d", attempt + 1, attempts, r.status_code)
                 await asyncio.sleep(backoff * (2 ** attempt))
         except (httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
             last_exc = exc
             if attempt < attempts - 1:
+                log.warning("stream retry %d/%d after %s", attempt + 1, attempts, type(exc).__name__)
                 await asyncio.sleep(backoff * (2 ** attempt))
     if r is not None:
         return r, True
@@ -159,11 +155,13 @@ async def _do_retry(
             r = await fn(request)
             if r.status_code < 500 or attempt >= attempts - 1:
                 return r
+            log.warning("retry %d/%d after status %d", attempt + 1, attempts, r.status_code)
             await asyncio.sleep(backoff * (2 ** attempt))
         except (httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
             last_exc = exc
             if attempt >= attempts - 1:
                 raise
+            log.warning("retry %d/%d after %s", attempt + 1, attempts, type(exc).__name__)
             await asyncio.sleep(backoff * (2 ** attempt))
     raise last_exc or httpx.ConnectError("all retry attempts exhausted")
 
@@ -262,6 +260,12 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
                 status_code=400,
                 media_type="application/json",
             )
+        if not payload["messages"]:
+            return Response(
+                content=json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": "messages must not be empty"}}),
+                status_code=400,
+                media_type="application/json",
+            )
 
         openai_payload = anthropic_to_openai(payload, settings.model_map, settings.default_model)
         is_stream = openai_payload.get("stream", False)
@@ -276,6 +280,8 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
             if is_stream:
                 if settings.retry_attempts > 1:
                     r, retried = await _stream_with_retry(client, req, settings.retry_attempts, settings.retry_backoff)
+                    if retried:
+                        log.info("rid=%s stream succeeded after retry", rid)
                 else:
                     r = await client.send(req, stream=True)
                 r.raise_for_status()
@@ -359,6 +365,12 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
                 media_type="application/json",
             )
         messages = payload.get("messages", [])
+        if not messages:
+            return Response(
+                content=json.dumps({"type": "error", "error": {"type": "invalid_request_error", "message": "messages must not be empty"}}),
+                status_code=400,
+                media_type="application/json",
+            )
         total_chars = sum(len(m.get("content", "")) if isinstance(m.get("content"), str) else len(str(m.get("content", ""))) for m in messages)
         total_words = sum(
             len(m.get("content", "").split()) if isinstance(m.get("content"), str) else 0
