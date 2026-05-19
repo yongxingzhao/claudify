@@ -47,8 +47,9 @@ Default listen address: `127.0.0.1:4000`.
 | ------ | ---- | ----------- |
 | `POST` | `/v1/messages` | Anthropic Messages API. Supports streaming (SSE) and tool use. |
 | `POST` | `/v1/messages/count_tokens` | Approximate input-token count (character-based heuristic; no upstream call). |
-| `GET`  | `/v1/models` | Proxies upstream `/models`. Falls back to `[default_model]` if the upstream call fails. |
-| `GET`  | `/health` | Liveness check. |
+| `GET`  | `/v1/models` | Lists mapped models from config. |
+| `GET`  | `/health` | Liveness check with optional upstream health. |
+| `GET`  | `/metrics` | Prometheus-text metrics (request counts, latency, upstream status). |
 
 ## Configuration
 
@@ -59,8 +60,16 @@ backend_base = "http://127.0.0.1:8000/v1"
 api_key = "sk-..."
 host = "127.0.0.1"
 port = 4000
-request_timeout = 120.0   # non-streaming HTTP timeout (seconds)
-stream_timeout  = 600.0   # streaming connect timeout; read timeout is unbounded
+
+connect_timeout = 10.0
+read_timeout = 120.0
+write_timeout = 10.0
+pool_timeout = 5.0
+
+retry_attempts = 3
+retry_backoff = 0.5
+
+cors_origins = ["http://localhost:3000"]
 
 [model_map]
 "claude-opus-4-7"   = "hermes-agent"
@@ -71,14 +80,29 @@ default_model = "hermes-agent"
 
 | Setting | Env var | Default | Notes |
 | --- | --- | --- | --- |
-| `backend_base` | `CLAUDIFY_BACKEND_BASE` | — | OpenAI-compatible base URL, e.g. `http://127.0.0.1:8000/v1`. |
+| `backend_base` | `CLAUDIFY_BACKEND_BASE` | — | OpenAI-compatible base URL. |
 | `api_key` | `CLAUDIFY_API_KEY` | — | Bearer token sent upstream. |
 | `host` | `CLAUDIFY_HOST` | `127.0.0.1` | Bind address. |
 | `port` | `CLAUDIFY_PORT` | `4000` | Bind port. |
-| `request_timeout` | `CLAUDIFY_REQUEST_TIMEOUT` | `120.0` | Timeout for non-streaming `/v1/messages`. |
-| `stream_timeout` | `CLAUDIFY_STREAM_TIMEOUT` | `600.0` | Connect timeout for streaming; read timeout is `None` so long SSE streams aren't cut off. |
-| `default_model` | `CLAUDIFY_DEFAULT_MODEL` | `hermes-agent` | Used when the requested model is unknown. |
-| `model_map` | (TOML only) | `{}` | Map Anthropic model names to upstream model names. Unknown names fall through to `default_model`. |
+| `connect_timeout` | `CLAUDIFY_CONNECT_TIMEOUT` | `10.0` | Connection timeout (seconds). |
+| `read_timeout` | `CLAUDIFY_READ_TIMEOUT` | `120.0` | Read timeout for non-streaming. |
+| `write_timeout` | `CLAUDIFY_WRITE_TIMEOUT` | `10.0` | Write timeout. |
+| `pool_timeout` | `CLAUDIFY_POOL_TIMEOUT` | `5.0` | Connection pool timeout. |
+| `retry_attempts` | `CLAUDIFY_RETRY_ATTEMPTS` | `0` | Max retry attempts for 5xx errors. |
+| `retry_backoff` | `CLAUDIFY_RETRY_BACKOFF` | `0.5` | Initial backoff in seconds (doubles each attempt). |
+| `default_model` | `CLAUDIFY_DEFAULT_MODEL` | — | Used when the requested model is unknown. |
+| `model_map` | (TOML only) | `{}` | Map Anthropic model names to upstream model names. |
+| `cors_origins` | (TOML only) | `[]` | Allowed CORS origins. |
+
+## Known unsupported features
+
+- **Thinking/extended thinking** — blocks are dropped; no `thinking` content in responses
+- **Cache control** — `cache_control` fields are stripped; no prompt caching
+- **Count tokens** — returns char/word-based estimate, not real tokenization
+- **Citations** — not mapped
+- **PDF/document attachments** — not supported
+
+See [docs/protocol-mapping.md](docs/protocol-mapping.md) for the full translation table.
 
 ## Run as a service
 
@@ -101,13 +125,18 @@ journalctl --user -u claudify -f
 
 ```
 src/claudify/
-├── settings.py         # pydantic-settings + ~/.config/claudify/config.toml loader
-├── conversion.py       # anthropic ↔ openai pure functions (request, response, stream)
-├── app.py              # FastAPI app: /v1/messages, /v1/messages/count_tokens, /v1/models, /health
-├── cli.py              # Typer CLI (`claudify` console script)
+├── settings.py         # pydantic-settings + config.toml loader
+├── conversion.py       # anthropic ↔ openai pure functions
+├── sse.py              # SSE event helpers + stop reason map
+├── errors.py           # error type mapping, sanitization, passthrough
+├── metrics.py          # Prometheus-text metrics collector
+├── retry.py            # retry with exponential backoff
+├── routes.py           # FastAPI route handlers
+├── app.py              # FastAPI app factory + middleware
+├── cli.py              # Typer CLI (claudify console script)
 └── service/
     ├── __init__.py     # platform dispatch
-    ├── systemd.py      # Linux user-unit installer (implemented)
+    ├── systemd.py      # Linux user-unit installer
     └── launchd.py      # macOS launchd installer (stub)
 ```
 

@@ -34,8 +34,8 @@ This document tracks the improvement plan derived from code reviews.
 | 12 | Forward `anthropic-beta` / `anthropic-version` headers | done |
 | 13 | Handle `thinking` blocks (strip + debug log) | done |
 | 14 | Map upstream HTTP status to Anthropic error types | done |
-| 19 | Add `docs/protocol-mapping.md` | pending |
-| 20 | Add "Known unsupported" section to README | pending |
+| 19 | Add `docs/protocol-mapping.md` | done |
+| 20 | Add "Known unsupported" section to README | done |
 
 ---
 
@@ -49,7 +49,7 @@ This document tracks the improvement plan derived from code reviews.
 | 16 | Error passthrough tests (401/429/400/500 mapping) | done |
 | 17 | CLI tests (typer.testing.CliRunner) | done |
 | 18 | GitHub Actions CI (matrix py3.10-3.13, ruff + pytest) | done |
-| 21 | Add `CHANGELOG.md` | pending |
+| 21 | Add `CHANGELOG.md` | done |
 
 ---
 
@@ -76,3 +76,4 @@ This document tracks the improvement plan derived from code reviews.
 | | Empty messages validation (400) | done |
 | | Retry logging | done |
 | | systemd unit Environment fix | done |
+| | Code splitting: app.py → routes/errors/metrics/retry/sse | done |
