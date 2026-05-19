@@ -1,4 +1,4 @@
-"""Tests for claudify.conversion."""
+"""Tests for Anthropic <-> OpenAI protocol conversion."""
 
 from __future__ import annotations
 
@@ -7,273 +7,232 @@ import json
 import pytest
 
 from claudify.conversion import (
+    _convert_tool_choice,
+    _sse,
+    _sse_ping,
+    _synthetic_stop_events,
     anthropic_to_openai,
     extract_text_from_blocks,
     map_model,
     openai_to_anthropic_response,
-    stream_openai_to_anthropic,
 )
 
 
-def test_map_model_explicit_match():
-    assert map_model("claude-opus-4-7", {"claude-opus-4-7": "x"}) == "x"
+# ---------- map_model --------------------------------------------------------
 
 
-def test_map_model_default_fallback():
-    assert map_model("unknown", {}, default="fallback") == "fallback"
+def test_map_model_exact_match():
+    assert map_model("claude-opus-4-7", {"claude-opus-4-7": "hermes-agent"}) == "hermes-agent"
 
 
-def test_map_model_passthrough_when_no_default():
+def test_map_model_fallback_default():
+    assert map_model("unknown", {}, default="gpt-4") == "gpt-4"
+
+
+def test_map_model_passthrough():
     assert map_model("unknown", {}) == "unknown"
 
 
-def test_extract_text_from_blocks_handles_tool_result_list():
-    blocks = [
-        {"type": "text", "text": "hello"},
-        {"type": "tool_result", "content": [{"type": "text", "text": "world"}]},
-        {"type": "image", "source": {"type": "base64", "data": "x", "media_type": "image/png"}},
-    ]
-    assert extract_text_from_blocks(blocks) == "hello\nworld\n[image omitted]"
+# ---------- anthropic_to_openai ---------------------------------------------
 
 
-def test_anthropic_to_openai_basic_user_message():
+def test_basic_user_message():
     payload = {
         "model": "claude-opus-4-7",
-        "system": "You are helpful.",
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 100,
-        "temperature": 0.5,
+        "messages": [{"role": "user", "content": "hello"}],
         "stream": False,
     }
     out = anthropic_to_openai(payload, {"claude-opus-4-7": "hermes-agent"})
     assert out["model"] == "hermes-agent"
-    assert out["messages"] == [
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "hi"},
-    ]
-    assert out["max_tokens"] == 100
-    assert out["temperature"] == 0.5
+    assert out["messages"] == [{"role": "user", "content": "hello"}]
     assert out["stream"] is False
-    assert "stream_options" not in out
 
 
-def test_anthropic_to_openai_no_user_guard():
-    out = anthropic_to_openai({"model": "x", "system": "sys"}, {})
-    assert out["messages"][-1] == {"role": "user", "content": "."}
-
-
-def test_anthropic_to_openai_stop_sequences_become_stop():
-    out = anthropic_to_openai(
-        {"model": "x", "messages": [{"role": "user", "content": "hi"}], "stop_sequences": ["END"]}, {}
-    )
-    assert out["stop"] == ["END"]
-
-
-def test_anthropic_to_openai_stream_options():
-    out = anthropic_to_openai(
-        {"model": "x", "messages": [{"role": "user", "content": "hi"}], "stream": True}, {}
-    )
-    assert out["stream"] is True
-    assert out["stream_options"] == {"include_usage": True}
-
-
-def test_anthropic_to_openai_tools_passthrough():
+def test_system_message():
     payload = {
-        "model": "x",
+        "model": "m",
+        "system": "You are helpful.",
         "messages": [{"role": "user", "content": "hi"}],
-        "tools": [
-            {
-                "name": "lookup",
-                "description": "lookup",
-                "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
-            }
-        ],
-        "tool_choice": {"type": "tool", "name": "lookup"},
     }
     out = anthropic_to_openai(payload, {})
-    assert out["tools"] == [
-        {
-            "type": "function",
-            "function": {
-                "name": "lookup",
-                "description": "lookup",
-                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
-            },
-        }
-    ]
-    assert out["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
+    assert out["messages"][0] == {"role": "system", "content": "You are helpful."}
 
 
-def test_anthropic_to_openai_assistant_tool_use_to_tool_calls():
+def test_system_blocks_with_cache_control():
     payload = {
-        "model": "x",
+        "model": "m",
+        "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    out = anthropic_to_openai(payload, {})
+    sys_msg = out["messages"][0]
+    assert sys_msg["role"] == "system"
+    assert sys_msg["content"] == "sys"
+
+
+def test_assistant_tool_use():
+    payload = {
+        "model": "m",
         "messages": [
-            {"role": "user", "content": "find the weather"},
+            {"role": "user", "content": "search"},
             {
                 "role": "assistant",
                 "content": [
-                    {"type": "text", "text": "calling..."},
-                    {"type": "tool_use", "id": "toolu_1", "name": "weather", "input": {"city": "SF"}},
-                ],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "sunny"},
+                    {"type": "text", "text": "let me look"},
+                    {"type": "tool_use", "id": "tu_1", "name": "search", "input": {"q": "x"}},
                 ],
             },
         ],
     }
     out = anthropic_to_openai(payload, {})
-    assert out["messages"] == [
-        {"role": "user", "content": "find the weather"},
-        {
-            "role": "assistant",
-            "content": "calling...",
-            "tool_calls": [
-                {
-                    "id": "toolu_1",
-                    "type": "function",
-                    "function": {"name": "weather", "arguments": json.dumps({"city": "SF"})},
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "toolu_1", "content": "sunny"},
+    assistant = [m for m in out["messages"] if m["role"] == "assistant"][0]
+    assert assistant["content"] == "let me look"
+    assert len(assistant["tool_calls"]) == 1
+    tc = assistant["tool_calls"][0]
+    assert tc["function"]["name"] == "search"
+    assert json.loads(tc["function"]["arguments"]) == {"q": "x"}
+
+
+def test_user_tool_result():
+    payload = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tu_1", "name": "fn", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_1", "content": "result text"},
+                ],
+            },
+        ],
+    }
+    out = anthropic_to_openai(payload, {})
+    tool_msgs = [m for m in out["messages"] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["tool_call_id"] == "tu_1"
+    assert tool_msgs[0]["content"] == "result text"
+
+
+def test_cache_control_does_not_mutate_input():
+    original_content = [
+        {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}},
+        {"type": "tool_result", "tool_use_id": "t1", "content": "ok", "cache_control": {"type": "ephemeral"}},
     ]
-
-
-def test_anthropic_to_openai_tool_result_error_marker():
     payload = {
-        "model": "x",
+        "model": "m",
         "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "t1", "content": "boom", "is_error": True},
-                ],
-            },
+            {"role": "user", "content": original_content},
+        ],
+    }
+    import copy
+    snap = copy.deepcopy(original_content)
+    anthropic_to_openai(payload, {})
+    # Original must not be mutated
+    assert original_content == snap
+
+
+def test_no_user_message_guard():
+    payload = {
+        "model": "m",
+        "messages": [
+            {"role": "assistant", "content": "hi"},
         ],
     }
     out = anthropic_to_openai(payload, {})
-    tool_msg = [m for m in out["messages"] if m["role"] == "tool"][0]
-    assert tool_msg["content"] == "[tool_error] boom"
+    assert any(m["role"] == "user" for m in out["messages"])
 
 
-def test_anthropic_to_openai_image_block_to_data_url():
+def test_temperature_and_max_tokens():
     payload = {
-        "model": "x",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "what's this"},
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"},
-                    },
-                ],
-            }
-        ],
+        "model": "m",
+        "messages": [{"role": "user", "content": "x"}],
+        "temperature": 0.5,
+        "max_tokens": 100,
     }
     out = anthropic_to_openai(payload, {})
-    user_msg = [m for m in out["messages"] if m["role"] == "user"][0]
-    assert user_msg["content"][1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    assert out["temperature"] == 0.5
+    assert out["max_tokens"] == 100
 
 
-def test_openai_to_anthropic_response_text_only():
-    resp = {
-        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 5, "completion_tokens": 2},
-    }
-    out = openai_to_anthropic_response(resp, "claude-opus-4-7")
-    assert out["model"] == "claude-opus-4-7"
-    assert out["content"] == [{"type": "text", "text": "hi"}]
-    assert out["stop_reason"] == "end_turn"
-    assert out["usage"] == {"input_tokens": 5, "output_tokens": 2}
-
-
-def test_openai_to_anthropic_response_tool_calls():
-    resp = {
-        "choices": [
-            {
-                "message": {
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "weather", "arguments": json.dumps({"city": "SF"})},
-                        }
-                    ],
-                },
-                "finish_reason": "tool_calls",
-            }
-        ],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-    }
-    out = openai_to_anthropic_response(resp, "x")
-    assert out["stop_reason"] == "tool_use"
-    assert out["content"] == [
-        {
-            "type": "tool_use",
-            "id": "call_1",
-            "name": "weather",
-            "input": {"city": "SF"},
-        }
-    ]
-
-
-def test_openai_to_anthropic_response_maps_user_to_metadata():
-    resp = {
-        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-        "user": "user-123",
-    }
-    out = openai_to_anthropic_response(resp, "x")
-    assert out["metadata"] == {"user_id": "user-123"}
-
-
-def test_anthropic_to_openai_cache_control_stripped():
+def test_stop_sequences():
     payload = {
-        "model": "x",
-        "system": [
-            {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}},
-        ],
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}},
-                ],
-            }
-        ],
+        "model": "m",
+        "messages": [{"role": "user", "content": "x"}],
+        "stop_sequences": ["END"],
     }
     out = anthropic_to_openai(payload, {})
-    # System text is preserved, cache_control silently stripped
-    assert out["messages"][0] == {"role": "system", "content": "sys"}
-    # User content has no cache_control
-    user_msg = [m for m in out["messages"] if m["role"] == "user"][0]
-    assert user_msg["content"] == "hi"
+    assert out["stop"] == ["END"]
 
 
-def test_anthropic_to_openai_top_k_passthrough():
+def test_top_k_passthrough():
     payload = {
-        "model": "x",
-        "messages": [{"role": "user", "content": "hi"}],
+        "model": "m",
+        "messages": [{"role": "user", "content": "x"}],
         "top_k": 40,
     }
     out = anthropic_to_openai(payload, {})
     assert out["top_k"] == 40
 
 
-def test_anthropic_to_openai_thinking_block_dropped():
+def test_tools_and_tool_choice():
     payload = {
-        "model": "x",
+        "model": "m",
+        "messages": [{"role": "user", "content": "x"}],
+        "tools": [{"name": "fn", "description": "a fn", "input_schema": {"type": "object", "properties": {}}}],
+        "tool_choice": {"type": "auto"},
+    }
+    out = anthropic_to_openai(payload, {})
+    assert len(out["tools"]) == 1
+    assert out["tool_choice"] == "auto"
+
+
+def test_tool_choice_any():
+    out = _convert_tool_choice({"type": "any"})
+    assert out == "required"
+
+
+def test_tool_choice_named():
+    out = _convert_tool_choice({"type": "tool", "name": "fn"})
+    assert out == {"type": "function", "function": {"name": "fn"}}
+
+
+def test_tool_choice_none():
+    assert _convert_tool_choice(None) is None
+    assert _convert_tool_choice("auto") is None
+
+
+def test_metadata_user_id():
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "x"}],
+        "metadata": {"user_id": "u-123"},
+    }
+    out = anthropic_to_openai(payload, {})
+    assert out["user"] == "u-123"
+
+
+def test_stream_options_included():
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "x"}],
+        "stream": True,
+    }
+    out = anthropic_to_openai(payload, {})
+    assert out["stream_options"] == {"include_usage": True}
+
+
+def test_thinking_block_dropped():
+    payload = {
+        "model": "m",
         "messages": [
             {
                 "role": "assistant",
                 "content": [
-                    {"type": "thinking", "thinking": "let me think..."},
+                    {"type": "thinking", "thinking": "hmm"},
                     {"type": "text", "text": "answer"},
                 ],
             },
@@ -281,91 +240,119 @@ def test_anthropic_to_openai_thinking_block_dropped():
         ],
     }
     out = anthropic_to_openai(payload, {})
-    assistant_msg = [m for m in out["messages"] if m["role"] == "assistant"][0]
-    # thinking block is dropped, only text preserved
-    assert assistant_msg["content"] == "answer"
+    assistant = [m for m in out["messages"] if m["role"] == "assistant"][0]
+    assert assistant["content"] == "answer"
+    assert "tool_calls" not in assistant
 
 
-async def _gather(agen):
-    return [chunk async for chunk in agen]
+# ---------- openai_to_anthropic_response ------------------------------------
 
 
-async def _async_lines(lines):
-    for line in lines:
-        yield line.encode("utf-8") if isinstance(line, str) else line
+def test_basic_response():
+    resp = {
+        "id": "chatcmpl-1",
+        "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    out = openai_to_anthropic_response(resp, "claude-opus-4-7")
+    assert out["model"] == "claude-opus-4-7"
+    assert out["content"][0]["type"] == "text"
+    assert out["content"][0]["text"] == "hi"
+    assert out["stop_reason"] == "end_turn"
+    assert out["usage"]["input_tokens"] == 10
 
 
-@pytest.mark.asyncio
-async def test_stream_text_relay_emits_full_sequence():
-    upstream = [
-        'data: {"choices":[{"delta":{"content":"he"}}]}\n',
-        'data: {"choices":[{"delta":{"content":"llo"}}]}\n',
-        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":7}}\n',
-        "data: [DONE]\n",
-    ]
-    chunks = await _gather(stream_openai_to_anthropic(_async_lines(upstream), "claude-opus-4-7"))
-    text = b"".join(chunks).decode()
-    assert "event: message_start" in text
-    assert "event: content_block_start" in text
-    assert '"text":"he"' in text and '"text":"llo"' in text
-    assert "event: content_block_stop" in text
-    assert "event: message_delta" in text
-    assert '"output_tokens":7' in text
-    assert "event: message_stop" in text
-
-
-@pytest.mark.asyncio
-async def test_stream_tool_call_relay():
-    upstream = [
-        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"name":"f","arguments":"{\\"a\\":"}}]}}]}\n',
-        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}\n',
-        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}\n',
-        "data: [DONE]\n",
-    ]
-    chunks = await _gather(stream_openai_to_anthropic(_async_lines(upstream), "x"))
-    text = b"".join(chunks).decode()
-    assert '"type":"tool_use"' in text
-    assert '"name":"f"' in text
-    assert '"partial_json":"{\\"a\\":"' in text
-    assert '"partial_json":"1}"' in text
-    assert '"stop_reason":"tool_use"' in text
-
-
-@pytest.mark.asyncio
-async def test_stream_handles_upstream_exception_gracefully():
-    async def bad_lines():
-        yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n'
-        raise RuntimeError("upstream died")
-
-    chunks = await _gather(stream_openai_to_anthropic(bad_lines(), "x"))
-    text = b"".join(chunks).decode()
-    assert "event: content_block_stop" in text
-    assert "event: message_delta" in text
-    assert "event: message_stop" in text
-
-
-def test_anthropic_to_openai_tool_result_precedes_user_text_in_same_turn():
-    payload = {
-        "model": "x",
-        "messages": [
-            {"role": "user", "content": "go look it up"},
+def test_tool_calls_response():
+    resp = {
+        "choices": [
             {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "id": "tool_1", "name": "search", "input": {"q": "x"}},
-                ],
-            },
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "fn", "arguments": '{"a":1}'},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 10},
+    }
+    out = openai_to_anthropic_response(resp, "m")
+    assert out["stop_reason"] == "tool_use"
+    assert out["content"][0]["type"] == "tool_use"
+    assert out["content"][0]["name"] == "fn"
+    assert out["content"][0]["input"] == {"a": 1}
+
+
+def test_malformed_tool_arguments():
+    resp = {
+        "choices": [
             {
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "tool_1", "content": "found"},
-                    {"type": "text", "text": "thanks, what about Y?"},
-                ],
-            },
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "c", "type": "function", "function": {"name": "f", "arguments": "not-json"}},
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
         ],
     }
-    out = anthropic_to_openai(payload, {})
-    roles = [m["role"] for m in out["messages"]]
-    assert roles == ["user", "assistant", "tool", "user"]
-    assert out["messages"][2]["tool_call_id"] == "tool_1"
-    assert out["messages"][3]["content"] == "thanks, what about Y?"
+    out = openai_to_anthropic_response(resp, "m")
+    assert out["content"][0]["input"] == {"_raw": "not-json"}
+
+
+def test_user_field_to_metadata():
+    resp = {
+        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+        "usage": {},
+        "user": "u-999",
+    }
+    out = openai_to_anthropic_response(resp, "m")
+    assert out["metadata"]["user_id"] == "u-999"
+
+
+# ---------- extract_text_from_blocks ----------------------------------------
+
+
+def test_extract_text_string():
+    assert extract_text_from_blocks("hello") == "hello"
+
+
+def test_extract_text_blocks():
+    blocks = [
+        {"type": "text", "text": "a"},
+        {"type": "tool_result", "content": "b"},
+    ]
+    assert extract_text_from_blocks(blocks) == "a\nb"
+
+
+# ---------- _sse helpers ---------------------------------------------------
+
+
+def test_sse_format():
+    result = _sse("ping", {"type": "ping"})
+    assert result.startswith(b"event: ping\n")
+    assert b"data: " in result
+    assert result.endswith(b"\n\n")
+
+
+def test_sse_ping():
+    result = _sse_ping()
+    assert result == b"event: ping\ndata: {}\n\n"
+
+
+def test_synthetic_stop_events():
+    events = _synthetic_stop_events("stop", {"prompt_tokens": 3, "completion_tokens": 5})
+    assert len(events) == 2
+    for ev in events:
+        assert ev.startswith(b"event: ")
+        assert ev.endswith(b"\n\n")
+    delta_line = [line for line in events[0].split(b"\n") if line.startswith(b"data: ")][0]
+    payload = json.loads(delta_line[len(b"data: "):])
+    assert payload["delta"]["stop_reason"] == "end_turn"

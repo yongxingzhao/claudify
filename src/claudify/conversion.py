@@ -1,4 +1,4 @@
-"""Pure functions for Anthropic ↔ OpenAI protocol conversion."""
+"""Pure functions for Anthropic \u2194 OpenAI protocol conversion."""
 
 from __future__ import annotations
 
@@ -47,16 +47,10 @@ def _system_to_openai(system: Any) -> str:
             continue
         if block.get("type") == "text":
             parts.append(block.get("text", ""))
-        # cache_control is Anthropic-specific; silently ignore.
     return "\n".join(p for p in parts if p)
 
 
 def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
-    """Return (openai_user_content, tool_messages).
-
-    Anthropic puts tool_result blocks inside a user message; OpenAI expects them as
-    separate {"role": "tool", ...} messages. We split them out here.
-    """
     if isinstance(content, str):
         return content, []
     if not isinstance(content, list):
@@ -68,8 +62,8 @@ def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
-        # cache_control is Anthropic-specific; strip silently.
-        block.pop("cache_control", None)
+        # Strip cache_control from a copy to avoid mutating the original payload
+        block = {k: v for k, v in block.items() if k != "cache_control"}
         if btype == "text":
             parts.append({"type": "text", "text": block.get("text", "")})
         elif btype == "image":
@@ -104,7 +98,6 @@ def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
 
 
 def _assistant_content_to_openai(content: Any) -> tuple[str, list[dict[str, Any]]]:
-    """Return (text, tool_calls). Anthropic tool_use blocks → OpenAI tool_calls."""
     if isinstance(content, str):
         return content, []
     if not isinstance(content, list):
@@ -130,15 +123,11 @@ def _assistant_content_to_openai(content: Any) -> tuple[str, list[dict[str, Any]
                 }
             )
         elif btype == "thinking":
-            # Anthropic extended thinking; OpenAI has no equivalent.
-            # Drop silently — clients that request thinking will not receive it back
-            # through the OpenAI backend, but the request still succeeds.
             log.debug("dropping thinking block (%d chars)", len(block.get("thinking", "")))
     return "\n".join(p for p in text_parts if p), tool_calls
 
 
 def extract_text_from_blocks(content: Any) -> str:
-    """Backward-compatible text extractor (kept for tests / callers)."""
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
@@ -241,7 +230,6 @@ def anthropic_to_openai(
     if "stop_sequences" in payload:
         openai_payload["stop"] = payload["stop_sequences"]
 
-    # top_k is not part of OpenAI spec, but some backends support it via extra params.
     if "top_k" in payload:
         openai_payload["top_k"] = payload["top_k"]
 
@@ -314,7 +302,6 @@ def openai_to_anthropic_response(openai_resp: dict[str, Any], original_model: st
         },
     }
 
-    # Map OpenAI user field back to Anthropic metadata.user_id.
     user = openai_resp.get("user")
     if user:
         result["metadata"] = {"user_id": user}
@@ -324,6 +311,10 @@ def openai_to_anthropic_response(openai_resp: dict[str, Any], original_model: st
 
 def _sse(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, separators=(',',':'))}\n\n".encode()
+
+
+def _sse_ping() -> bytes:
+    return b"event: ping\ndata: {}\n\n"
 
 
 async def stream_openai_to_anthropic(
@@ -356,7 +347,6 @@ async def stream_openai_to_anthropic(
     next_index = 0
     tool_state: dict[int, dict[str, Any]] = {}
 
-    # Buffer for reassembling SSE events from byte chunks.
     buf = ""
 
     try:
@@ -366,13 +356,10 @@ async def stream_openai_to_anthropic(
             else:
                 chunk_text = raw
             buf += chunk_text
-            # SSE events are delimited by blank lines (\n\n).
-            # Also handle line-by-line input (each line is its own event).
             while True:
                 if "\n\n" in buf:
                     event_text, buf = buf.split("\n\n", 1)
                 elif buf.startswith("data:") and buf.endswith("\n"):
-                    # Single line without trailing blank line — treat as one event
                     event_text = buf.rstrip("\n")
                     buf = ""
                 else:
@@ -472,43 +459,65 @@ async def stream_openai_to_anthropic(
 
                     if choice0.get("finish_reason"):
                         finish_reason = choice0["finish_reason"]
+
+            # Forward ping to keep connection alive
+            yield _sse_ping()
+
     except Exception:
-        log.exception("stream relay error")
-        finish_reason = "stop"
+        if text_block_open:
+            yield _sse(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": text_block_index},
+            )
+        for _ev in _synthetic_stop_events(finish_reason, upstream_usage):
+                yield _ev
+        return
 
     if text_block_open:
         yield _sse(
             "content_block_stop",
-            {
-                "type": "content_block_stop",
-                "index": text_block_index,
-            },
+            {"type": "content_block_stop", "index": text_block_index},
         )
     for state in tool_state.values():
         yield _sse(
             "content_block_stop",
-            {
-                "type": "content_block_stop",
-                "index": state["block_index"],
-            },
+            {"type": "content_block_stop", "index": state["block_index"]},
         )
 
-    output_tokens = 0
-    input_tokens = 0
+    stop_reason = _STOP_REASON_MAP.get(finish_reason, "end_turn")
+    usage_out: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
     if upstream_usage:
-        output_tokens = upstream_usage.get("completion_tokens", 0) or 0
-        input_tokens = upstream_usage.get("prompt_tokens", 0) or 0
-
-    message_delta_usage: dict[str, Any] = {"output_tokens": output_tokens}
-    if input_tokens:
-        message_delta_usage["input_tokens"] = input_tokens
+        usage_out = {
+            "input_tokens": upstream_usage.get("prompt_tokens", 0) or 0,
+            "output_tokens": upstream_usage.get("completion_tokens", 0) or 0,
+        }
 
     yield _sse(
         "message_delta",
         {
             "type": "message_delta",
-            "delta": {"stop_reason": _STOP_REASON_MAP.get(finish_reason, "end_turn"), "stop_sequence": None},
-            "usage": message_delta_usage,
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+            "usage": usage_out,
         },
     )
     yield _sse("message_stop", {"type": "message_stop"})
+
+
+def _synthetic_stop_events(
+    finish_reason: str = "stop",
+    upstream_usage: dict[str, Any] | None = None,
+) -> list[bytes]:
+    stop_reason = _STOP_REASON_MAP.get(finish_reason, "end_turn")
+    usage: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
+    if upstream_usage:
+        usage = {
+            "input_tokens": upstream_usage.get("prompt_tokens", 0) or 0,
+            "output_tokens": upstream_usage.get("completion_tokens", 0) or 0,
+        }
+    return [
+        _sse(
+            "message_delta",
+            {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": usage},
+        ),
+        _sse("message_stop", {"type": "message_stop"}),
+    ]

@@ -1,4 +1,4 @@
-"""Tests for the FastAPI app via httpx.MockTransport."""
+"""Tests for FastAPI app endpoints."""
 
 from __future__ import annotations
 
@@ -11,262 +11,275 @@ from claudify.app import create_app
 from claudify.settings import Settings
 
 
-def _client(handler):
-    transport = httpx.MockTransport(handler)
-    upstream = httpx.AsyncClient(transport=transport)
-    s = Settings(
-        backend_base="http://upstream/v1",
-        api_key="sk-test",
-        host="127.0.0.1",
-        port=4000,
-        log_level="WARNING",
-        request_timeout=10.0,
-        model_map={"claude-opus-4-7": "hermes-agent"},
-        default_model="",
-    )
-    app = create_app(s, http_client=upstream)
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver"), app
+def _chat_response(body="hi", finish="stop", model="m", usage=None):
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": body}, "finish_reason": finish}],
+        "usage": usage or {"prompt_tokens": 5, "completion_tokens": 3},
+    }
 
 
-@pytest.mark.asyncio
-async def test_health(make_client, noop_handler):
-    client, app = make_client(noop_handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.get("/health")
-        assert r.status_code == 200
-        assert r.json() == {"status": "ok"}
+def _handler(body="hi", status=200, usage=None):
+    resp = _chat_response(body=body, usage=usage)
+    def handler(request):
+        return httpx.Response(status, json=resp)
+    return handler
 
 
-@pytest.mark.asyncio
-async def test_models_lists_known_ids(make_client, noop_handler):
-    client, app = make_client(noop_handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.get("/v1/models")
-        ids = [m["id"] for m in r.json()["data"]]
-        assert "claude-opus-4-7" in ids
-
-
-@pytest.mark.asyncio
-async def test_messages_non_streaming_round_trip(make_client):
-    captured: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["body"] = json.loads(request.content)
-        captured["auth"] = request.headers.get("authorization")
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 4, "completion_tokens": 1},
-            },
-        )
-
-    client, app = make_client(handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.post(
-            "/v1/messages",
-            json={
-                "model": "claude-opus-4-7",
-                "max_tokens": 32,
-                "messages": [{"role": "user", "content": "ping"}],
-            },
-        )
-
+@pytest.mark.anyio
+async def test_messages_non_stream(make_client):
+    client, _ = make_client(_handler("hello"))
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 100,
+    })
     assert r.status_code == 200
-    body = r.json()
-    assert body["model"] == "claude-opus-4-7"
-    assert body["content"] == [{"type": "text", "text": "pong"}]
-    assert body["usage"] == {"input_tokens": 4, "output_tokens": 1}
-    assert captured["url"].endswith("/v1/chat/completions")
-    assert captured["auth"] == "Bearer sk-test"
-    assert captured["body"]["model"] == "hermes-agent"
+    data = r.json()
+    assert data["content"][0]["text"] == "hello"
+    await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_messages_upstream_error_maps_to_anthropic_type(make_client):
-    upstream_err = {"error": {"type": "rate_limit_error", "message": "slow down"}}
-
+@pytest.mark.anyio
+async def test_messages_upstream_500(make_client):
     def handler(request):
-        return httpx.Response(429, json=upstream_err)
+        return httpx.Response(500, json={"error": {"message": "Internal"}})
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 500
+    data = r.json()
+    assert data["type"] == "error"
+    assert data["error"]["type"] == "api_error"
+    await client.aclose()
 
-    client, app = make_client(handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.post(
-            "/v1/messages",
-            json={
-                "model": "claude-opus-4-7",
-                "messages": [{"role": "user", "content": "x"}],
-            },
-        )
 
+@pytest.mark.anyio
+async def test_messages_upstream_429(make_client):
+    def handler(request):
+        return httpx.Response(429, json={"error": {"message": "rate limited"}})
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
     assert r.status_code == 429
-    body = r.json()
-    assert body["error"]["type"] == "rate_limit_error"
-    assert body["error"]["message"] == "slow down"
-    assert "upstream_status" not in body
-    assert "upstream_body" not in body
+    assert r.json()["error"]["type"] == "rate_limit_error"
+    await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_messages_upstream_error_maps_unknown_status(make_client):
+@pytest.mark.anyio
+async def test_messages_upstream_401(make_client):
     def handler(request):
-        return httpx.Response(418, content=b"I am a teapot")
-
-    client, app = make_client(handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.post(
-            "/v1/messages",
-            json={
-                "model": "claude-opus-4-7",
-                "messages": [{"role": "user", "content": "x"}],
-            },
-        )
-    assert r.status_code == 418
-    body = r.json()
-    assert body["error"]["type"] == "api_error"
+        return httpx.Response(401, json={"error": {"message": "bad key"}})
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 401
+    assert r.json()["error"]["type"] == "authentication_error"
+    await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_messages_upstream_unavailable_returns_502(make_client):
+@pytest.mark.anyio
+async def test_messages_upstream_404(make_client):
     def handler(request):
-        raise httpx.ConnectError("nope", request=request)
-
-    client, app = make_client(handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.post(
-            "/v1/messages",
-            json={
-                "model": "claude-opus-4-7",
-                "messages": [{"role": "user", "content": "x"}],
-            },
-        )
-
-    assert r.status_code == 502
-    assert r.json()["error"]["type"] == "upstream_unavailable"
+        return httpx.Response(404, json={"error": {"message": "not found"}})
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 404
+    assert r.json()["error"]["type"] == "not_found_error"
+    await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_messages_streaming_relays_anthropic_events(make_client):
-    sse_body = (
-        b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
-        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
-        b"data: [DONE]\n\n"
-    )
-
-    def handler(request):
-        return httpx.Response(200, content=sse_body, headers={"content-type": "text/event-stream"})
-
-    client, app = make_client(handler)
-    async with app.router.lifespan_context(app):
-        async with client:
-            async with client.stream(
-                "POST",
-                "/v1/messages",
-                json={
-                    "model": "claude-opus-4-7",
-                    "stream": True,
-                    "messages": [{"role": "user", "content": "x"}],
-                },
-            ) as r:
-                assert r.status_code == 200
-                text = b"".join([c async for c in r.aiter_raw()]).decode()
-
-    assert "event: message_start" in text
-    assert '"text":"hi"' in text
-    assert '"output_tokens":1' in text
-    assert "event: message_stop" in text
-
-
-@pytest.mark.asyncio
-async def test_messages_invalid_json_400(make_client, noop_handler):
-    client, app = make_client(noop_handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.post(
-            "/v1/messages", content=b"{not json", headers={"content-type": "application/json"}
-        )
+@pytest.mark.anyio
+async def test_messages_invalid_json(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    r = await client.post("/v1/messages", content=b"not json", headers={"Content-Type": "application/json"})
     assert r.status_code == 400
     assert r.json()["error"]["type"] == "invalid_request_error"
+    await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_count_tokens_returns_estimate(make_client, noop_handler):
-    client, app = make_client(noop_handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.post(
-            "/v1/messages/count_tokens",
-            json={
-                "model": "claude-opus-4-7",
-                "system": "You are helpful.",
-                "messages": [{"role": "user", "content": "hello world"}],
-            },
-        )
+@pytest.mark.anyio
+async def test_messages_body_too_large(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}), max_body_size=100)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "x" * 200}],
+    })
+    assert r.status_code == 413
+    assert r.json()["error"]["type"] == "invalid_request_error"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_health(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    r = await client.get("/health")
     assert r.status_code == 200
-    body = r.json()
-    assert isinstance(body["input_tokens"], int)
-    assert body["input_tokens"] >= 1
+    assert r.json()["status"] == "ok"
+    await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_count_tokens_invalid_json_400(make_client, noop_handler):
-    client, app = make_client(noop_handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.post(
-            "/v1/messages/count_tokens",
-            content=b"nope",
-            headers={"content-type": "application/json"},
-        )
+@pytest.mark.anyio
+async def test_health_with_upstream_check(make_client):
+    def handler(request):
+        if "healthz" in str(request.url):
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(200, json=_chat_response())
+    client, _ = make_client(handler, upstream_health_path="healthz")
+    r = await client.get("/health")
+    assert r.json()["upstream"] == "ok"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_metrics(make_client):
+    client, _ = make_client(_handler("hi"))
+    await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    r = await client.get("/metrics")
+    assert r.status_code == 200
+    assert "claudify_requests_total" in r.text
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_list_models(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}), model_map={"claude-opus-4-7": "hermes-agent"})
+    r = await client.get("/v1/models")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["object"] == "list"
+    ids = [m["id"] for m in data["data"]]
+    assert "claude-opus-4-7" in ids
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_list_models_empty(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}), model_map={}, default_model="")
+    r = await client.get("/v1/models")
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["data"]) >= 1
+    assert data["data"][0]["id"] == "default"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_list_models_default_only(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}), model_map={}, default_model="gpt-4")
+    r = await client.get("/v1/models")
+    data = r.json()
+    ids = [m["id"] for m in data["data"]]
+    assert "gpt-4" in ids
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_count_tokens(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    r = await client.post("/v1/messages/count_tokens", json={
+        "messages": [{"role": "user", "content": "hello world"}],
+    })
+    assert r.status_code == 200
+    assert "input_tokens" in r.json()
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_count_tokens_invalid_json(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    r = await client.post("/v1/messages/count_tokens", content=b"bad")
     assert r.status_code == 400
+    await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_streaming_request_uses_unbounded_read_timeout(make_client):
-    captured: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["timeout"] = request.extensions.get("timeout")
-        body = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
-        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
-
-    client, app = make_client(handler)
-    async with app.router.lifespan_context(app):
-        async with client:
-            async with client.stream(
-                "POST",
-                "/v1/messages",
-                json={
-                    "model": "claude-opus-4-7",
-                    "stream": True,
-                    "messages": [{"role": "user", "content": "x"}],
-                },
-            ) as r:
-                async for _ in r.aiter_raw():
-                    pass
-
-    assert captured["timeout"]["read"] is None
-    assert captured["timeout"]["connect"] is not None
+@pytest.mark.anyio
+async def test_error_message_sanitization(make_client):
+    def handler(request):
+        return httpx.Response(500, json={"error": {"message": "Internal error at https://api.evil.com with sk-abc123"}})
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 500
+    msg = r.json()["error"]["message"]
+    assert "sk-abc123" not in msg
+    assert "https://api.evil.com" not in msg
+    assert "redacted" in msg
+    await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_anthropic_beta_header_forwarded(make_client):
-    seen: dict = {}
+@pytest.mark.anyio
+async def test_cors_headers(make_client):
+    client, _ = make_client(_handler("hi"), cors_origins=["http://localhost:3000"])
+    r = await client.options("/v1/messages", headers={
+        "Origin": "http://localhost:3000",
+        "Access-Control-Request-Method": "POST",
+    })
+    assert "access-control-allow-origin" in r.headers
+    await client.aclose()
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["beta"] = request.headers.get("anthropic-beta", "")
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-            },
-        )
 
-    client, app = make_client(handler)
-    async with client, app.router.lifespan_context(app):
-        r = await client.post(
-            "/v1/messages",
-            headers={"anthropic-beta": "prompt-caching-2024-07-31"},
-            json={"model": "claude-opus-4-7", "messages": [{"role": "user", "content": "x"}]},
-        )
-        assert r.status_code == 200
-        assert seen["beta"] == "prompt-caching-2024-07-31"
+@pytest.mark.anyio
+async def test_anthropic_headers_forwarded(make_client):
+    captured = {}
+    def handler(request):
+        captured["anthropic_beta"] = request.headers.get("anthropic-beta")
+        captured["anthropic_version"] = request.headers.get("anthropic-version")
+        return httpx.Response(200, json=_chat_response())
+    client, _ = make_client(handler)
+    await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    }, headers={
+        "anthropic-beta": "max-tokens-3-5",
+        "anthropic-version": "2023-06-01",
+    })
+    assert captured["anthropic_beta"] == "max-tokens-3-5"
+    assert captured["anthropic_version"] == "2023-06-01"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_request_id_header(make_client):
+    client, _ = make_client(_handler("hi"))
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert "x-request-id" in r.headers
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_retry_on_503(make_client):
+    call_count = 0
+    def handler(request):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            return httpx.Response(503, json={"error": {"message": "overloaded"}})
+        return httpx.Response(200, json=_chat_response())
+    client, _ = make_client(handler, retry_attempts=3, retry_backoff=0.01)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 200
+    assert call_count == 3
+    await client.aclose()

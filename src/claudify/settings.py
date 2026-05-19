@@ -45,11 +45,14 @@ class Settings(BaseSettings):
     retry_attempts: int = Field(default=0, ge=0, le=10)
     retry_backoff: float = Field(default=0.5, ge=0.0)
 
-    # Max request body size in bytes. Requests exceeding this are rejected with 413.
     max_body_size: int = Field(default=10 * 1024 * 1024, ge=0)  # 10 MB
 
     model_map: dict[str, str] = Field(default_factory=dict)
     default_model: str = Field(default="")
+
+    cors_origins: list[str] = Field(default_factory=list)
+
+    upstream_health_path: str = Field(default="")
 
     model_config = SettingsConfigDict(
         env_prefix="CLAUDIFY_",

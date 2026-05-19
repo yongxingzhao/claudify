@@ -1,396 +1,335 @@
-"""FastAPI app factory."""
+"""FastAPI application: Anthropic Messages API proxy to OpenAI backend."""
 
 from __future__ import annotations
 
-import asyncio
-import json as _json
+import json
 import logging
-import random
 import time
 import uuid
-from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .conversion import (
+from claudify.conversion import (
+    _sse,
+    _sse_ping,
+    _synthetic_stop_events,
     anthropic_to_openai,
-    extract_text_from_blocks,
+    map_model,
     openai_to_anthropic_response,
     stream_openai_to_anthropic,
 )
-from .conversion import _sse
-from .settings import Settings
+from claudify.settings import Settings
 
-_RETRYABLE_STATUS = {502, 503, 504}
-
-
-# ---------- Metrics -----------------------------------------------------------
-
-_LATENCY_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
+log = logging.getLogger("claudify")
 
 
 class _Metrics:
     def __init__(self) -> None:
-        self.requests_total: dict[tuple[str, str, str], int] = {}
-        self.upstream_total: dict[tuple[str, str], int] = {}
-        self.latency_buckets: dict[str, list[int]] = {}
-        self.latency_sum: dict[str, float] = {}
-        self.latency_count: dict[str, int] = {}
+        self._requests: dict[str, int] = {}
+        self._latencies: list[float] = []
+        self._upstream: dict[str, int] = {}
 
-    def observe(self, *, method: str, route: str, status: int, latency_s: float) -> None:
-        cls = f"{status // 100}xx"
-        key = (method, route, cls)
-        self.requests_total[key] = self.requests_total.get(key, 0) + 1
-        buckets = self.latency_buckets.setdefault(route, [0] * (len(_LATENCY_BUCKETS) + 1))
-        for i, b in enumerate(_LATENCY_BUCKETS):
-            if latency_s <= b:
-                buckets[i] += 1
-        buckets[-1] += 1
-        self.latency_sum[route] = self.latency_sum.get(route, 0.0) + latency_s
-        self.latency_count[route] = self.latency_count.get(route, 0) + 1
-
-    def upstream(self, *, route: str, status: int) -> None:
-        cls = f"{status // 100}xx"
-        key = (route, cls)
-        self.upstream_total[key] = self.upstream_total.get(key, 0) + 1
+    def record_request(self, route: str, latency: float, upstream_status: int | None = None) -> None:
+        self._requests[route] = self._requests.get(route, 0) + 1
+        self._latencies.append(latency)
+        if upstream_status is not None:
+            bucket = "2xx" if 200 <= upstream_status < 300 else "4xx" if 400 <= upstream_status < 500 else "5xx"
+            self._upstream[bucket] = self._upstream.get(bucket, 0) + 1
 
     def render(self) -> str:
         lines: list[str] = []
-        lines.append("# HELP claudify_requests_total Total HTTP requests handled.")
-        lines.append("# TYPE claudify_requests_total counter")
-        for (method, route, cls), n in sorted(self.requests_total.items()):
-            lines.append(f'claudify_requests_total{{method="{method}",route="{route}",status="{cls}"}} {n}')
-        lines.append("# HELP claudify_upstream_responses_total Upstream responses by status class.")
-        lines.append("# TYPE claudify_upstream_responses_total counter")
-        for (route, cls), n in sorted(self.upstream_total.items()):
-            lines.append(f'claudify_upstream_responses_total{{route="{route}",status="{cls}"}} {n}')
-        lines.append("# HELP claudify_request_latency_seconds Request latency.")
-        lines.append("# TYPE claudify_request_latency_seconds histogram")
-        for route, buckets in sorted(self.latency_buckets.items()):
-            cumulative = 0
-            for i, b in enumerate(_LATENCY_BUCKETS):
-                cumulative += buckets[i]
-                lines.append(
-                    f'claudify_request_latency_seconds_bucket{{route="{route}",le="{b}"}} {cumulative}'
-                )
-            cumulative += buckets[-1]
-            lines.append(f'claudify_request_latency_seconds_bucket{{route="{route}",le="+Inf"}} {cumulative}')
-            lines.append(f'claudify_request_latency_seconds_sum{{route="{route}"}} {self.latency_sum[route]}')
-            lines.append(
-                f'claudify_request_latency_seconds_count{{route="{route}"}} {self.latency_count[route]}'
-            )
+        for route, count in sorted(self._requests.items()):
+            lines.append(f'claudify_requests_total{{route="{route}"}} {count}')
+        bucket_bounds = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+        lats = sorted(self._latencies)
+        for bound in bucket_bounds:
+            cnt = sum(1 for l in lats if l <= bound)
+            lines.append(f"claudify_request_latency_seconds_bucket{{le={bound}}} {cnt}")
+        lines.append(f"claudify_request_latency_seconds_bucket{{le=+Inf}} {len(lats)}")
+        lines.append(f"claudify_request_latency_seconds_count {len(lats)}")
+        if lats:
+            lines.append(f"claudify_request_latency_seconds_sum {sum(lats):.6f}")
+        for bucket, count in sorted(self._upstream.items()):
+            lines.append(f'claudify_upstream_responses_total{{status="{bucket}"}} {count}')
         return "\n".join(lines) + "\n"
 
 
-# ---------- Error mapping ----------------------------------------------------
-
-_HTTP_TO_ANTHROPIC_ERROR = {
+_ANTHROPIC_ERROR_MAP: dict[int, str] = {
     400: "invalid_request_error",
     401: "authentication_error",
     403: "permission_error",
     404: "not_found_error",
     429: "rate_limit_error",
     500: "api_error",
-    502: "upstream_unavailable",
+    502: "api_error",
     503: "overloaded_error",
-    504: "upstream_unavailable",
+    504: "api_error",
 }
 
 
-def _passthrough_error(body: bytes, status_code: int) -> dict:
-    """Translate an upstream error into an Anthropic-shaped error response."""
-    text = body.decode("utf-8", errors="replace") if body else ""
-    try:
-        parsed = _json.loads(text)
-    except Exception:
-        parsed = None
-
-    error_type = _HTTP_TO_ANTHROPIC_ERROR.get(status_code, "api_error")
-    message = f"http {status_code}"
-
-    if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
-        err = dict(parsed["error"])
-        err.setdefault("type", error_type)
-        err.setdefault("message", err.get("message", message))
-        return {"error": err}
-    if isinstance(parsed, dict):
-        msg = parsed.get("message") or parsed.get("error") or message
-        if isinstance(msg, str):
-            message = msg
-        return {"error": {"type": error_type, "message": str(message)[:2000]}}
-    if text:
-        message = text[:2000]
-    return {"error": {"type": error_type, "message": message}}
+def _sanitize_error_message(msg: str) -> str:
+    for pattern in ("http://", "https://", "api_key=", "sk-", "Bearer "):
+        idx = msg.lower().find(pattern.lower())
+        if idx != -1:
+            msg = msg[:idx] + "...[redacted]"
+    return msg.strip() or "Upstream error"
 
 
-# ---------- Synthetic SSE close -----------------------------------------------
-
-
-def _synthetic_stop_events(reason: str = "end_turn") -> list[bytes]:
-    return [
-        _sse(
-            "message_delta",
-            {
-                "type": "message_delta",
-                "delta": {"stop_reason": reason, "stop_sequence": None},
-                "usage": {"output_tokens": 0},
-            },
-        ),
-        _sse("message_stop", {"type": "message_stop"}),
-    ]
-
-
-# ---------- Retry -------------------------------------------------------------
+def _passthrough_error(status: int, body: dict[str, Any]) -> JSONResponse:
+    error_type = _ANTHROPIC_ERROR_MAP.get(status, "api_error")
+    upstream_msg = ""
+    if isinstance(body.get("error"), dict):
+        upstream_msg = body["error"].get("message", "")
+    elif isinstance(body.get("error"), str):
+        upstream_msg = body["error"]
+    elif body.get("detail"):
+        upstream_msg = str(body["detail"])
+    message = _sanitize_error_message(upstream_msg) if upstream_msg else f"Upstream returned {status}"
+    return JSONResponse(
+        status_code=status,
+        content={"type": "error", "error": {"type": error_type, "message": message}},
+    )
 
 
 async def _post_with_retry(
     client: httpx.AsyncClient,
     *,
     url: str,
-    json: dict,
-    headers: dict,
+    json: dict[str, Any],
+    headers: dict[str, str],
     timeout: httpx.Timeout,
     attempts: int,
     backoff: float,
 ) -> httpx.Response:
-    last_exc: Exception | None = None
-    for i in range(attempts + 1):
-        try:
-            resp = await client.post(url, json=json, headers=headers, timeout=timeout)
-            if resp.status_code in _RETRYABLE_STATUS and i < attempts:
-                await resp.aread()
-                await resp.aclose()
-                await _sleep_backoff(backoff, i)
-                continue
-            return resp
-        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
-            last_exc = e
-            if i < attempts:
-                await _sleep_backoff(backoff, i)
-                continue
-            raise
-    assert last_exc is not None
-    raise last_exc
+    last: httpx.Response | None = None
+    max_tries = 1 + attempts
+    for i in range(max_tries):
+        r = await client.post(url, json=json, headers=headers, timeout=timeout)
+        if r.status_code not in (502, 503, 504) or i == max_tries - 1:
+            return r
+        last = r
+        if i < max_tries - 1:
+            import asyncio
+            await asyncio.sleep(backoff * (2 ** i))
+    return last  # type: ignore[return-value]
 
 
-async def _sleep_backoff(base: float, attempt: int) -> None:
-    delay = base * (2**attempt)
-    delay = random.uniform(base, max(base, delay))
-    await asyncio.sleep(delay)
+async def _stream_with_retry(
+    client: httpx.AsyncClient,
+    *,
+    url: str,
+    json: dict[str, Any],
+    headers: dict[str, str],
+    timeout: httpx.Timeout,
+    attempts: int,
+    backoff: float,
+) -> httpx.Response:
+    max_tries = 1 + attempts
+    last_req = None
+    last_resp = None
+    for i in range(max_tries):
+        req = client.build_request("POST", url, json=json, headers=headers, timeout=timeout)
+        r = await client.send(req, stream=True)
+        if r.status_code not in (502, 503, 504) or i == max_tries - 1:
+            return r
+        await r.aclose()
+        last_req = req
+        last_resp = r
+        if i < max_tries - 1:
+            import asyncio
+            await asyncio.sleep(backoff * (2 ** i))
+    # Should not reach here, but just in case
+    raise httpx.HTTPStatusError("max retries exhausted", request=last_req or req, response=last_resp or r)
 
 
-# ---------- App factory -------------------------------------------------------
+def create_app(settings: Settings, *, http_client: httpx.AsyncClient | None = None) -> FastAPI:
+    app = FastAPI(title="claudify", docs_url=None, redoc_url=None)
 
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
-def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClient | None = None) -> FastAPI:
-    s = settings or Settings.load()
-    log = logging.getLogger("claudify")
     metrics = _Metrics()
-
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        if http_client is not None:
-            app.state.http = http_client
-            app.state.owns_http = False
-        else:
-            app.state.http = httpx.AsyncClient(timeout=s.httpx_timeout())
-            app.state.owns_http = True
-        try:
-            yield
-        finally:
-            if app.state.owns_http:
-                await app.state.http.aclose()
-
-    app = FastAPI(title="claudify", version="0.1.0", lifespan=lifespan)
-
-    # Reject oversized request bodies.
-    @app.middleware("http")
-    async def limit_body_size(request: Request, call_next: Callable[[Request], Awaitable[Response]]):
-        if request.method == "POST" and s.max_body_size > 0:
-            cl = int(request.headers.get("content-length", "0"))
-            if cl > s.max_body_size:
-                return JSONResponse(
-                    status_code=413,
-                    content={"error": {"type": "invalid_request_error", "message": f"request body too large ({cl} bytes, limit {s.max_body_size})"}},
-                )
-        return await call_next(request)
+    client = http_client or httpx.AsyncClient()
 
     @app.middleware("http")
-    async def observability(request: Request, call_next: Callable[[Request], Awaitable[Response]]):
+    async def request_id_middleware(request: Request, call_next: Any) -> Any:
         rid = request.headers.get("x-request-id") or uuid.uuid4().hex
         request.state.request_id = rid
-        route = request.url.path
-        start = time.perf_counter()
-        try:
-            response = await call_next(request)
-            status = response.status_code
-            return response
-        except Exception:
-            status = 500
-            raise
-        finally:
-            latency = time.perf_counter() - start
-            metrics.observe(method=request.method, route=route, status=status, latency_s=latency)
-            log.info(
-                "request",
-                extra={
-                    "request_id": rid,
-                    "method": request.method,
-                    "route": route,
-                    "status": status,
-                    "latency_ms": round(latency * 1000, 2),
-                },
-            )
-
-    @app.middleware("http")
-    async def attach_request_id_header(request: Request, call_next: Callable[[Request], Awaitable[Response]]):
+        t0 = time.monotonic()
         response = await call_next(request)
-        rid = getattr(request.state, "request_id", None)
-        if rid:
-            response.headers["x-request-id"] = rid
+        elapsed = time.monotonic() - t0
+        response.headers["x-request-id"] = rid
+        route = request.url.path
+        metrics.record_request(route, elapsed)
         return response
 
-    # ---------- Routes -------------------------------------------------------
-
     @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> dict[str, Any]:
+        result: dict[str, Any] = {"status": "ok"}
+        if settings.upstream_health_path:
+            try:
+                r = await client.get(
+                    f"{settings.backend_base.rstrip('/')}/{settings.upstream_health_path.lstrip('/')}",
+                    timeout=httpx.Timeout(5.0),
+                )
+                result["upstream"] = "ok" if r.status_code == 200 else f"error:{r.status_code}"
+            except Exception as exc:
+                result["upstream"] = f"unreachable:{exc}"
+        return result
 
     @app.get("/metrics")
-    async def metrics_endpoint() -> PlainTextResponse:
-        return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
+    async def metrics_endpoint() -> Response:
+        return Response(content=metrics.render(), media_type="text/plain")
 
     @app.get("/v1/models")
-    async def models() -> dict:
-        ids = sorted(set(list(s.model_map.keys()) + ([s.default_model] if s.default_model else [])))
+    async def list_models() -> dict[str, Any]:
+        models = list(settings.model_map.keys())
+        if settings.default_model and settings.default_model not in models:
+            models.append(settings.default_model)
+        if not models:
+            models = [settings.default_model or "default"]
         return {
             "object": "list",
-            "data": [
-                {"id": m, "object": "model", "created": int(time.time()), "owned_by": "claudify"} for m in ids
-            ],
+            "data": [{"id": m, "object": "model", "owned_by": "claudify"} for m in models],
         }
 
-    @app.post("/v1/messages/count_tokens")
-    async def count_tokens(request: Request):
-        try:
-            payload = await request.json()
-        except Exception as e:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"type": "invalid_request_error", "message": f"invalid JSON: {e}"}},
-            )
-        chars = 0
-        sys_field = payload.get("system")
-        if isinstance(sys_field, str):
-            chars += len(sys_field)
-        elif isinstance(sys_field, list):
-            chars += len(extract_text_from_blocks(sys_field))
-        for msg in payload.get("messages", []) or []:
-            chars += len(extract_text_from_blocks(msg.get("content")))
-        return {"input_tokens": max(1, chars // 4)}
-
     @app.post("/v1/messages")
-    async def messages(request: Request):
-        rid = getattr(request.state, "request_id", "")
+    async def messages(request: Request) -> Response:
+        raw = await request.body()
+        if len(raw) > settings.max_body_size:
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": f"Request body too large ({len(raw)} bytes, max {settings.max_body_size})",
+                    },
+                },
+            )
         try:
-            payload = await request.json()
-        except Exception as e:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
             return JSONResponse(
                 status_code=400,
-                content={"error": {"type": "invalid_request_error", "message": f"invalid JSON: {e}"}},
+                content={"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON"}},
             )
 
         original_model = payload.get("model", "")
-        stream = bool(payload.get("stream", False))
-        openai_payload = anthropic_to_openai(payload, s.model_map, s.default_model)
-        url = f"{s.backend_base.rstrip('/')}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream" if stream else "application/json",
-        }
-        # Pass through Anthropic-specific headers that backends may need.
-        for hname in ("anthropic-beta", "anthropic-version"):
-            val = request.headers.get(hname)
-            if val:
-                headers[hname] = val
-        if s.api_key:
-            headers["Authorization"] = f"Bearer {s.api_key}"
+        openai_payload = anthropic_to_openai(payload, settings.model_map, settings.default_model)
+        is_stream = openai_payload.get("stream", False)
+        timeout = settings.httpx_timeout(streaming=is_stream)
+
+        upstream_headers: dict[str, str] = {"Content-Type": "application/json"}
+        if settings.api_key:
+            upstream_headers["Authorization"] = f"Bearer {settings.api_key}"
+        rid = getattr(request.state, "request_id", "")
         if rid:
-            headers["X-Request-ID"] = rid
+            upstream_headers["x-request-id"] = rid
+        for hdr in ("anthropic-beta", "anthropic-version"):
+            val = request.headers.get(hdr)
+            if val:
+                upstream_headers[hdr] = val
 
-        client: httpx.AsyncClient = request.app.state.http
-        route = "/v1/messages"
+        url = f"{settings.backend_base.rstrip('/')}/chat/completions"
 
+        if is_stream:
+            return await _handle_stream(client, url, openai_payload, upstream_headers, timeout,
+                                        settings, original_model, metrics)
+        return await _handle_non_stream(client, url, openai_payload, upstream_headers, timeout,
+                                        settings, original_model, metrics)
+
+    async def _handle_stream(
+        client: httpx.AsyncClient, url: str, openai_payload: dict, upstream_headers: dict,
+        timeout: httpx.Timeout, settings: Settings, original_model: str, metrics: _Metrics,
+    ) -> Response:
         try:
-            if stream:
-                stream_timeout = s.httpx_timeout(streaming=True)
-                req = client.build_request(
-                    "POST",
-                    url,
-                    json=openai_payload,
-                    headers=headers,
-                    timeout=stream_timeout,
+            if settings.retry_attempts > 0:
+                upstream = await _stream_with_retry(
+                    client, url=url, json=openai_payload, headers=upstream_headers,
+                    timeout=timeout, attempts=settings.retry_attempts, backoff=settings.retry_backoff,
                 )
+            else:
+                req = client.build_request("POST", url, json=openai_payload, headers=upstream_headers, timeout=timeout)
                 upstream = await client.send(req, stream=True)
-                metrics.upstream(route=route, status=upstream.status_code)
-                if upstream.status_code >= 400:
-                    body = await upstream.aread()
-                    await upstream.aclose()
-                    return JSONResponse(
-                        status_code=upstream.status_code,
-                        content=_passthrough_error(body, upstream.status_code),
-                    )
+        except httpx.HTTPStatusError as exc:
+            await exc.response.aclose()
+            return _passthrough_error(exc.response.status_code, {})
+        except httpx.RequestError as exc:
+            return JSONResponse(status_code=502, content={"type": "error", "error": {"type": "api_error", "message": f"upstream unavailable: {exc}"}})
 
-                async def relay():
-                    upstream_failed = False
-                    try:
-                        async for chunk in stream_openai_to_anthropic(upstream.aiter_bytes(), original_model):
-                            yield chunk
-                    except (httpx.HTTPError, asyncio.CancelledError) as e:
-                        upstream_failed = True
-                        log.warning(
-                            "stream interrupted",
-                            extra={"request_id": rid, "error": f"{type(e).__name__}: {e}"},
-                        )
-                    finally:
-                        if upstream_failed:
-                            for ev in _synthetic_stop_events():
-                                yield ev
-                        await upstream.aclose()
+        if upstream.status_code >= 400:
+            body = await upstream.aread()
+            await upstream.aclose()
+            try:
+                parsed = json.loads(body)
+            except json.JSONDecodeError:
+                parsed = {}
+            metrics.record_request("/v1/messages", 0, upstream.status_code)
+            return _passthrough_error(upstream.status_code, parsed)
 
-                return StreamingResponse(relay(), media_type="text/event-stream")
+        async def _generate() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in stream_openai_to_anthropic(upstream.aiter_bytes(), original_model):
+                    yield chunk
+            finally:
+                await upstream.aclose()
 
-            resp = await _post_with_retry(
-                client,
-                url=url,
-                json=openai_payload,
-                headers=headers,
-                timeout=s.httpx_timeout(),
-                attempts=s.retry_attempts,
-                backoff=s.retry_backoff,
-            )
-            metrics.upstream(route=route, status=resp.status_code)
-            if resp.status_code >= 400:
-                return JSONResponse(
-                    status_code=resp.status_code,
-                    content=_passthrough_error(resp.content, resp.status_code),
+        return StreamingResponse(content=_generate(), media_type="text/event-stream")
+
+    async def _handle_non_stream(
+        client: httpx.AsyncClient, url: str, openai_payload: dict, upstream_headers: dict,
+        timeout: httpx.Timeout, settings: Settings, original_model: str, metrics: _Metrics,
+    ) -> Response:
+        try:
+            if settings.retry_attempts > 0:
+                upstream = await _post_with_retry(
+                    client, url=url, json=openai_payload, headers=upstream_headers,
+                    timeout=timeout, attempts=settings.retry_attempts, backoff=settings.retry_backoff,
                 )
-            return JSONResponse(content=openai_to_anthropic_response(resp.json(), original_model))
+            else:
+                upstream = await client.post(url, json=openai_payload, headers=upstream_headers, timeout=timeout)
+        except httpx.RequestError as exc:
+            return JSONResponse(status_code=502, content={"type": "error", "error": {"type": "api_error", "message": f"upstream unavailable: {exc}"}})
 
-        except httpx.HTTPError as e:
-            log.exception("upstream error", extra={"request_id": rid})
+        if upstream.status_code >= 400:
+            metrics.record_request("/v1/messages", 0, upstream.status_code)
+            return _passthrough_error(upstream.status_code, upstream.json())
+
+        metrics.record_request("/v1/messages", 0, upstream.status_code)
+        anthropic_resp = openai_to_anthropic_response(upstream.json(), original_model)
+        return JSONResponse(content=anthropic_resp)
+
+    @app.post("/v1/messages/count_tokens")
+    async def count_tokens(request: Request) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError:
             return JSONResponse(
-                status_code=502,
-                content={"error": {"type": "upstream_unavailable", "message": f"{type(e).__name__}: {e}"}},
+                status_code=400,
+                content={"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid JSON"}},
             )
-        except Exception as e:
-            log.exception("internal error", extra={"request_id": rid})
-            return JSONResponse(
-                status_code=500,
-                content={"error": {"type": "internal_error", "message": str(e)}},
-            )
+        text = payload.get("messages", [{}])
+        total_chars = sum(len(str(m)) for m in text)
+        return {"input_tokens": max(1, total_chars // 4)}
+
+    @app.on_event("shutdown")
+    async def shutdown() -> None:
+        await client.aclose()
 
     return app
+
+
+def create_app_from_settings() -> FastAPI:
+    s = Settings.load()
+    return create_app(s)
