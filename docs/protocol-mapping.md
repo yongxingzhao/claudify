@@ -60,7 +60,7 @@ This document describes how claudify translates between the Anthropic Messages A
 | `choices[0].finish_reason` | `stop_reason` | See finish reason mapping |
 | `usage.prompt_tokens` | `usage.input_tokens` | |
 | `usage.completion_tokens` | `usage.output_tokens` | |
-| `model` | `model` | Reverse-mapped through model_map if possible |
+| `model` | `model` | Reverse-mapped through model_map if upstream returns a different model name |
 | `id` | `id` | Prefixed with `msg_` if not already |
 
 ### Finish Reason Mapping

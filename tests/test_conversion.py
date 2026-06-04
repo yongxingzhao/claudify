@@ -67,6 +67,26 @@ def test_assistant_tool_use():
     assert json.loads(tc["function"]["arguments"]) == {"q": "x"}
 
 
+def test_assistant_tool_use_only():
+    """When assistant has only tool_calls and no text, content should be None."""
+    payload = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "search"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "tu_1", "name": "search", "input": {"q": "x"}},
+                ],
+            },
+        ],
+    }
+    out = anthropic_to_openai(payload, {})
+    assistant = [m for m in out["messages"] if m["role"] == "assistant"][0]
+    assert assistant["content"] is None
+    assert len(assistant["tool_calls"]) == 1
+
+
 def test_user_tool_result():
     payload = {
         "model": "m",
@@ -176,6 +196,11 @@ def test_tool_choice_named():
 def test_tool_choice_none():
     assert _convert_tool_choice(None) is None
     assert _convert_tool_choice("auto") is None
+
+
+def test_tool_choice_type_none():
+    out = _convert_tool_choice({"type": "none"})
+    assert out == "none"
 
 
 def test_metadata_user_id():

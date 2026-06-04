@@ -37,16 +37,21 @@ def init_config() -> None:
         '# See https://github.com/yongxingzhao/claudify for docs\n\n'
         'backend_base = "http://127.0.0.1:8000/v1"\n'
         '# api_key = ""  # Set your API key here\n'
+        '# inbound_api_key = ""  # Require this key in inbound x-api-key header\n'
         'host = "127.0.0.1"\n'
         'port = 4000\n'
         'log_level = "INFO"\n\n'
         '# Timeout settings (seconds)\n'
         '# request_timeout = 300.0\n'
         '# connect_timeout = 10.0\n'
-        '# read_timeout = 300.0\n\n'
-        '# Retry settings\n'
+        '# read_timeout = 300.0\n'
+        '# write_timeout = 10.0\n'
+        '# pool_timeout = 5.0\n\n'
+        '# Retry settings (number of retries after the initial attempt)\n'
         '# retry_attempts = 0\n'
         '# retry_backoff = 0.5\n\n'
+        '# Maximum request body size (bytes)\n'
+        '# max_body_size = 10485760\n\n'
         '# Model mapping: Anthropic name -> OpenAI name\n'
         '# Uncomment and edit to enable model routing\n'
         '# [model_map]\n'
@@ -55,7 +60,9 @@ def init_config() -> None:
         '# Default model when no mapping matches\n'
         '# default_model = "gpt-4o"\n\n'
         '# CORS origins (for browser access)\n'
-        '# cors_origins = ["http://localhost:3000"]\n',
+        '# cors_origins = ["http://localhost:3000"]\n\n'
+        '# Upstream health check path (appended to backend_base)\n'
+        '# upstream_health_path = "healthz"\n',
         encoding="utf-8",
     )
     os.chmod(cfg, 0o600)

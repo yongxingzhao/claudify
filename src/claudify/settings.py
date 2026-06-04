@@ -20,7 +20,7 @@ else:
 log = logging.getLogger("claudify.settings")
 
 _VALID_FIELDS = {
-    "backend_base", "api_key", "host", "port", "log_level",
+    "backend_base", "api_key", "inbound_api_key", "host", "port", "log_level",
     "request_timeout", "connect_timeout", "read_timeout", "write_timeout", "pool_timeout",
     "retry_attempts", "retry_backoff", "max_body_size",
     "model_map", "default_model", "cors_origins", "upstream_health_path",
@@ -42,6 +42,7 @@ def _load_toml(path: Path) -> dict[str, Any]:
 class Settings(BaseSettings):
     backend_base: str = Field(default="http://127.0.0.1:8000/v1")
     api_key: str = Field(default="")
+    inbound_api_key: str = Field(default="")
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=4000)
     log_level: str = Field(default="INFO")

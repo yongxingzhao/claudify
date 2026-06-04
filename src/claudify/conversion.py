@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -129,6 +130,14 @@ def _assistant_content_to_openai(content: Any) -> tuple[str, list[dict[str, Any]
     return "\n".join(p for p in text_parts if p), tool_calls
 
 
+def _reverse_map_model(model: str, model_map: dict[str, str]) -> str:
+    """Try to reverse-map an OpenAI model name back to the Anthropic name."""
+    for anthropic_name, openai_name in model_map.items():
+        if openai_name == model:
+            return anthropic_name
+    return model
+
+
 def extract_text_from_blocks(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -183,6 +192,8 @@ def _convert_tool_choice(tc: Any) -> Any:
     ttype = tc.get("type")
     if ttype == "auto":
         return "auto"
+    if ttype == "none":
+        return "none"
     if ttype == "any":
         return "required"
     if ttype == "tool" and tc.get("name"):
@@ -209,12 +220,12 @@ def anthropic_to_openai(
                 out_messages.append({"role": "user", "content": user_content})
         elif role == "assistant":
             text, tool_calls = _assistant_content_to_openai(content)
-            entry: dict[str, Any] = {"role": "assistant", "content": text or None}
             if tool_calls:
-                entry["tool_calls"] = tool_calls
-            # Keep messages even if content is empty and no tool_calls (state messages)
-            if entry["content"] is None and not tool_calls:
-                entry["content"] = ""
+                entry: dict[str, Any] = {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
+            else:
+                entry = {"role": "assistant", "content": text or None}
+                if entry["content"] is None:
+                    entry["content"] = ""
             out_messages.append(entry)
 
     has_user = any(m["role"] == "user" for m in out_messages)
@@ -234,6 +245,7 @@ def anthropic_to_openai(
         openai_payload["stop"] = payload["stop_sequences"]
 
     if "top_k" in payload:
+        log.warning("top_k is not a standard OpenAI parameter; most backends will ignore it")
         openai_payload["top_k"] = payload["top_k"]
 
     tools = _convert_tools(payload.get("tools"))
@@ -265,7 +277,9 @@ def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
     return {"_raw": arguments}
 
 
-def openai_to_anthropic_response(openai_resp: dict[str, Any], original_model: str) -> dict[str, Any]:
+def openai_to_anthropic_response(
+    openai_resp: dict[str, Any], original_model: str, model_map: dict[str, str] | None = None,
+) -> dict[str, Any]:
     choice = (openai_resp.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
     text = msg.get("content") or ""
@@ -302,6 +316,13 @@ def openai_to_anthropic_response(openai_resp: dict[str, Any], original_model: st
         },
     }
 
+    # Reverse-map the upstream model if it differs from the original request
+    upstream_model = openai_resp.get("model", "")
+    if upstream_model and upstream_model != original_model and model_map:
+        result["model"] = _reverse_map_model(upstream_model, model_map)
+
+    result["created_at"] = int(time.time())
+
     user = openai_resp.get("user")
     if user:
         result["metadata"] = {"user_id": user}
@@ -327,6 +348,7 @@ async def stream_openai_to_anthropic(
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
+                "created_at": int(time.time()),
                 "usage": {"input_tokens": 0, "output_tokens": 0},
             },
         },

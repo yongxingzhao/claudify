@@ -28,7 +28,7 @@ class RequestIdMiddleware:
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] in ("http", "websocket"):
-            rid = str(uuid.uuid4())[:8]
+            rid = uuid.uuid4().hex[:16]
             scope.setdefault("state", {})
             scope["state"]["request_id"] = rid
         await self.app(scope, receive, send)
@@ -65,14 +65,15 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
         app.add_middleware(
             CORSMiddleware,
             allow_origins=settings.cors_origins,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Content-Type", "Authorization", "x-api-key", "anthropic-version", "anthropic-beta"],
         )
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> Response:
-        log.exception("unhandled error")
-        return make_error_response("api_error", "internal error", 500)
+        rid = getattr(request.state, "request_id", "")
+        log.exception("rid=%s unhandled error", rid)
+        return make_error_response("api_error", f"internal error (rid={rid})" if rid else "internal error", 500)
 
     @app.post("/v1/messages")
     async def _messages(request: Request) -> Response:

@@ -55,6 +55,9 @@ def _validate_messages_payload(body: bytes, settings: Settings) -> tuple[dict[st
         return None, make_error_response("invalid_request_error", "Request must be a JSON object", 400)
     if "model" not in payload:
         return None, make_error_response("invalid_request_error", "Missing required field: model", 400)
+    model = payload.get("model")
+    if not isinstance(model, str) or not model or len(model) > 256:
+        return None, make_error_response("invalid_request_error", "model must be a non-empty string (max 256 chars)", 400)
     if "messages" not in payload:
         return None, make_error_response("invalid_request_error", "Missing required field: messages", 400)
     if not isinstance(payload["messages"], list):
@@ -79,6 +82,14 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
     t0 = time.monotonic()
     rid = getattr(request.state, "request_id", "")
 
+    # Optional inbound authentication
+    if settings.inbound_api_key:
+        key = request.headers.get("x-api-key") or ""
+        if key != settings.inbound_api_key:
+            return _add_request_id(
+                make_error_response("authentication_error", "Invalid API key", 401), request,
+            )
+
     body = await request.body()
     payload, err = _validate_messages_payload(body, settings)
     if err:
@@ -95,8 +106,10 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
 
     try:
         if is_stream:
-            if settings.retry_attempts > 1:
-                r, retried = await stream_with_retry(client, req, settings.retry_attempts, settings.retry_backoff)
+            if settings.retry_attempts >= 1:
+                r, retried = await stream_with_retry(
+                    client, req, settings.retry_attempts + 1, settings.retry_backoff,
+                )
                 if retried:
                     log.info("rid=%s stream succeeded after retry", rid)
             else:
@@ -110,7 +123,7 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
                     ):
                         yield chunk
                 except Exception:
-                    log.warning("rid=%s stream interrupted", rid)
+                    log.warning("rid=%s stream interrupted", rid, exc_info=True)
                     for ev in synthetic_stop_events("stop", None):
                         yield ev
                 finally:
@@ -119,8 +132,10 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
             resp = StreamingResponse(_generate(), media_type="text/event-stream")
             return _add_request_id(resp, request)
         else:
-            if settings.retry_attempts > 1:
-                r = await post_with_retry(client, req, settings.retry_attempts, settings.retry_backoff)
+            if settings.retry_attempts >= 1:
+                r = await post_with_retry(
+                    client, req, settings.retry_attempts + 1, settings.retry_backoff,
+                )
             else:
                 r = await client.send(req)
             r.raise_for_status()
@@ -130,7 +145,10 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
         elapsed = time.monotonic() - t0
         metrics.record_request("/v1/messages", elapsed, exc.response.status_code)
         log.warning("rid=%s upstream %d", rid, exc.response.status_code)
-        return _add_request_id(passthrough_error(exc.response.status_code, exc.response.content), request)
+        resp = passthrough_error(exc.response.status_code, exc.response.content)
+        if is_stream:
+            await exc.response.aclose()
+        return _add_request_id(resp, request)
     except httpx.TimeoutException as exc:
         elapsed = time.monotonic() - t0
         metrics.record_request("/v1/messages", elapsed, 504)
@@ -144,7 +162,7 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
 
     elapsed = time.monotonic() - t0
     metrics.record_request("/v1/messages", elapsed, r.status_code)
-    result = openai_to_anthropic_response(data, payload.get("model", ""))
+    result = openai_to_anthropic_response(data, payload.get("model", ""), settings.model_map)
     resp = Response(content=json.dumps(result), media_type="application/json")
     return _add_request_id(resp, request)
 
@@ -183,17 +201,38 @@ async def count_tokens(request: Request) -> Response:
         payload = json.loads(body)
     except json.JSONDecodeError:
         return make_error_response("invalid_request_error", "Invalid JSON", 400)
+    if not isinstance(payload, dict):
+        return make_error_response("invalid_request_error", "Request must be a JSON object", 400)
     msgs = payload.get("messages", [])
     if not isinstance(msgs, list) or not msgs:
         return make_error_response("invalid_request_error", "messages must be a non-empty array", 400)
     total_chars = 0
     total_words = 0
+    # Count system prompt
+    system = payload.get("system")
+    if isinstance(system, str) and system:
+        total_chars += len(system)
+        total_words += len(system.split())
+    elif isinstance(system, list):
+        for item in system:
+            if isinstance(item, dict) and item.get("type") == "text":
+                t = item.get("text", "")
+                total_chars += len(t)
+                total_words += len(t.split())
+    # Count messages
     for m in msgs:
+        if not isinstance(m, dict):
+            continue
         c = m.get("content", "")
         if isinstance(c, str):
             total_chars += len(c)
             total_words += len(c.split())
-        else:
-            total_chars += len(str(c))
+        elif isinstance(c, list):
+            for block in c:
+                if isinstance(block, dict):
+                    t = block.get("text", "") or block.get("content", "")
+                    if isinstance(t, str):
+                        total_chars += len(t)
+                        total_words += len(t.split())
     estimated = max(total_words, total_chars // 4)
     return Response(content=json.dumps({"input_tokens": estimated}), media_type="application/json")

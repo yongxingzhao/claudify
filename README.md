@@ -35,7 +35,8 @@ uv tool install .
 ## Quick start
 
 ```bash
-claudify init-config --backend http://127.0.0.1:8000/v1 --api-key YOUR_KEY
+claudify init-config
+# Edit ~/.config/claudify/config.toml to set backend_base and api_key
 claudify run
 ```
 
@@ -82,6 +83,7 @@ default_model = "hermes-agent"
 | --- | --- | --- | --- |
 | `backend_base` | `CLAUDIFY_BACKEND_BASE` | `http://127.0.0.1:8000/v1` | OpenAI-compatible base URL. |
 | `api_key` | `CLAUDIFY_API_KEY` | _(empty)_ | Bearer token sent upstream. |
+| `inbound_api_key` | `CLAUDIFY_INBOUND_API_KEY` | _(empty)_ | If set, require this key in inbound `x-api-key` header. |
 | `host` | `CLAUDIFY_HOST` | `127.0.0.1` | Bind address. |
 | `port` | `CLAUDIFY_PORT` | `4000` | Bind port. |
 | `connect_timeout` | `CLAUDIFY_CONNECT_TIMEOUT` | _(same as request_timeout)_ | Connection timeout (seconds). |
@@ -108,7 +110,7 @@ See [docs/protocol-mapping.md](docs/protocol-mapping.md) for the full translatio
 ## Run as a service
 
 ```bash
-claudify install-service --backend http://127.0.0.1:8000/v1 --api-key YOUR_KEY
+claudify install-service --backend http://127.0.0.1:8000/v1
 ```
 
 - **Linux (systemd):** writes `~/.config/systemd/user/claudify.service`, then `systemctl --user enable --now claudify`.

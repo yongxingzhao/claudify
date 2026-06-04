@@ -409,3 +409,70 @@ async def test_request_id_in_response(make_client, chat_response):
     })
     assert "x-request-id" in r.headers
     await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_inbound_api_key_valid(make_client, chat_response):
+    def handler(r):
+        return httpx.Response(200, json=chat_response(body="hi"))
+    client, _ = make_client(handler, inbound_api_key="my-secret-key")
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    }, headers={"x-api-key": "my-secret-key"})
+    assert r.status_code == 200
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_inbound_api_key_invalid(make_client, chat_response):
+    def handler(r):
+        return httpx.Response(200, json=chat_response(body="hi"))
+    client, _ = make_client(handler, inbound_api_key="my-secret-key")
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    }, headers={"x-api-key": "wrong-key"})
+    assert r.status_code == 401
+    assert r.json()["error"]["type"] == "authentication_error"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_inbound_api_key_missing(make_client, chat_response):
+    def handler(r):
+        return httpx.Response(200, json=chat_response(body="hi"))
+    client, _ = make_client(handler, inbound_api_key="my-secret-key")
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 401
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_count_tokens_non_dict_payload(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    r = await client.post("/v1/messages/count_tokens", json=[1, 2, 3])
+    assert r.status_code == 400
+    assert "JSON object" in r.json()["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_count_tokens_with_system_prompt(make_client):
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    r = await client.post("/v1/messages/count_tokens", json={
+        "system": "You are a helpful assistant.",
+        "messages": [{"role": "user", "content": "hello world"}],
+    })
+    assert r.status_code == 200
+    tokens_with_system = r.json()["input_tokens"]
+
+    r2 = await client.post("/v1/messages/count_tokens", json={
+        "messages": [{"role": "user", "content": "hello world"}],
+    })
+    tokens_without_system = r2.json()["input_tokens"]
+    assert tokens_with_system > tokens_without_system
+    await client.aclose()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 
@@ -19,13 +20,14 @@ def install(host: str, port: int, backend_base: str) -> None:
     if env_lines:
         env_section = "Environment=" + " ".join(env_lines) + "\n"
 
+    claudify_bin = shutil.which("claudify") or str(Path.home() / ".local/bin/claudify")
     unit = (
         "[Unit]\n"
         "Description=Claudify proxy\n"
         "After=network.target\n\n"
         "[Service]\n"
         f"{env_section}"
-        "ExecStart=%h/.local/bin/claudify run\n\n"
+        f"ExecStart={claudify_bin} run\n\n"
         "[Install]\n"
         "WantedBy=default.target\n"
     )

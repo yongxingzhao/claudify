@@ -23,10 +23,12 @@ def make_client():
         retry_backoff: float = 0.5,
         cors_origins: list[str] | None = None,
         upstream_health_path: str = "",
+        inbound_api_key: str = "",
     ) -> tuple[httpx.AsyncClient, Settings]:
         s = Settings(
             backend_base="http://test-backend/v1",
             api_key="test-key",
+            inbound_api_key=inbound_api_key,
             model_map=model_map if model_map is not None else {"claude-opus-4-7": "hermes-agent"},
             default_model=default_model,
             max_body_size=max_body_size,

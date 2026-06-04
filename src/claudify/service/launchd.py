@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -23,6 +24,7 @@ def install(host: str, port: int, backend_base: str) -> None:
     if env_xml:
         env_section = "  <key>EnvironmentVariables</key>\n  <dict>\n" + env_xml + "  </dict>\n"
 
+    claudify_bin = shutil.which("claudify") or str(Path.home() / ".local/bin/claudify")
     plist = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -30,7 +32,7 @@ def install(host: str, port: int, backend_base: str) -> None:
         '<plist version="1.0"><dict>\n'
         "  <key>Label</key><string>com.claudify</string>\n"
         "  <key>ProgramArguments</key><array>\n"
-        f"    <string>{escape(str(Path.home() / '.local/bin/claudify'))}</string>\n"
+        f"    <string>{escape(claudify_bin)}</string>\n"
         "    <string>run</string>\n"
         "  </array>\n"
         f"{env_section}"

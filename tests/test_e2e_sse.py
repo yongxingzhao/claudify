@@ -115,3 +115,54 @@ async def test_sse_stream_upstream_error(make_client):
     })
     assert r.status_code == 500
     await client.aclose()
+
+
+def _stream_tool_call_chunks():
+    """Upstream handler that returns a streaming tool call response."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunks = [
+            {"id": "chatcmpl-2", "choices": [{"delta": {"role": "assistant"}, "index": 0}], "model": "m"},
+            {"id": "chatcmpl-2", "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_abc", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]}, "index": 0}], "model": "m"},
+            {"id": "chatcmpl-2", "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"lo"}}]}, "index": 0}], "model": "m"},
+            {"id": "chatcmpl-2", "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "cation"}}]}, "index": 0}], "model": "m"},
+            {"id": "chatcmpl-2", "choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\": \"SF\"}"}}]}, "index": 0}], "model": "m"},
+            {"id": "chatcmpl-2", "choices": [{"delta": {}, "finish_reason": "tool_calls", "index": 0}], "model": "m"},
+            {"id": "chatcmpl-2", "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+        ]
+        lines = []
+        for c in chunks:
+            lines.append(f"data: {json.dumps(c)}")
+        lines.append("data: [DONE]")
+        content = "\n\n".join(lines) + "\n\n"
+        return httpx.Response(200, content=content.encode(), headers={"content-type": "text/event-stream"})
+
+    return handler
+
+
+@pytest.mark.anyio
+async def test_sse_stream_tool_call(make_client):
+    client, _ = make_client(_stream_tool_call_chunks())
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "weather?"}],
+        "stream": True,
+    })
+    assert r.status_code == 200
+    events = _parse_sse_events(r.content)
+
+    # Should have tool_use content_block_start
+    tool_starts = [e for e in events if e["event"] == "content_block_start"
+                   and e["data"].get("content_block", {}).get("type") == "tool_use"]
+    assert len(tool_starts) == 1
+    assert tool_starts[0]["data"]["content_block"]["name"] == "get_weather"
+
+    # Should have input_json_delta deltas
+    json_deltas = [e for e in events if e["event"] == "content_block_delta"
+                   and e["data"].get("delta", {}).get("type") == "input_json_delta"]
+    assert len(json_deltas) >= 1
+
+    # Should have tool_use stop_reason
+    delta_events = [e for e in events if e["event"] == "message_delta"]
+    assert delta_events[-1]["data"]["delta"]["stop_reason"] == "tool_use"
+
+    await client.aclose()
