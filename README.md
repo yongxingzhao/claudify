@@ -91,11 +91,13 @@ default_model = "hermes-agent"
 | `write_timeout` | `CLAUDIFY_WRITE_TIMEOUT` | _(same as request_timeout)_ | Write timeout. |
 | `pool_timeout` | `CLAUDIFY_POOL_TIMEOUT` | _(same as request_timeout)_ | Connection pool timeout. |
 | `request_timeout` | `CLAUDIFY_REQUEST_TIMEOUT` | `300.0` | Fallback timeout for any unset timeout. |
-| `retry_attempts` | `CLAUDIFY_RETRY_ATTEMPTS` | `0` | Max retry attempts for 5xx errors. |
-| `retry_backoff` | `CLAUDIFY_RETRY_BACKOFF` | `0.5` | Initial backoff in seconds (doubles each attempt). |
+| `retry_attempts` | `CLAUDIFY_RETRY_ATTEMPTS` | `0` | Max retry attempts for 5xx/429 errors (after initial attempt). |
+| `retry_backoff` | `CLAUDIFY_RETRY_BACKOFF` | `0.5` | Initial backoff in seconds (doubles each attempt, capped at 30s). |
 | `default_model` | `CLAUDIFY_DEFAULT_MODEL` | _(empty)_ | Used when the requested model is unknown. |
 | `model_map` | (TOML only) | `{}` | Map Anthropic model names to upstream model names. |
 | `cors_origins` | (TOML only) | `[]` | Allowed CORS origins. |
+| `max_body_size` | `CLAUDIFY_MAX_BODY_SIZE` | `10485760` | Max request body size in bytes. |
+| `upstream_health_path` | `CLAUDIFY_UPSTREAM_HEALTH_PATH` | _(empty)_ | Upstream health check path. |
 
 ## Known unsupported features
 

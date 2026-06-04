@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import time
@@ -85,13 +86,14 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
     # Optional inbound authentication
     if settings.inbound_api_key:
         key = request.headers.get("x-api-key") or ""
-        if key != settings.inbound_api_key:
+        if not hmac.compare_digest(key, settings.inbound_api_key):
             return _add_request_id(
                 make_error_response("authentication_error", "Invalid API key", 401), request,
             )
 
     body = await request.body()
     payload, err = _validate_messages_payload(body, settings)
+    body = None
     if err:
         return _add_request_id(err, request)
 
@@ -102,7 +104,13 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
 
     log.info("rid=%s model=%s -> %s stream=%s", rid, payload.get("model"), openai_payload.get("model"), is_stream)
 
-    req = client.build_request("POST", upstream_path, json=openai_payload, headers=headers)
+    if is_stream:
+        req = client.build_request(
+            "POST", upstream_path, json=openai_payload, headers=headers,
+            timeout=settings.httpx_timeout(streaming=True),
+        )
+    else:
+        req = client.build_request("POST", upstream_path, json=openai_payload, headers=headers)
 
     try:
         if is_stream:
@@ -119,7 +127,7 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
             async def _generate() -> AsyncIterator[bytes]:
                 try:
                     async for chunk in stream_openai_to_anthropic(
-                        r.aiter_bytes(), payload.get("model", "")
+                        r.aiter_bytes(), payload.get("model", ""), settings.model_map,
                     ):
                         yield chunk
                 except Exception:
@@ -162,6 +170,7 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
 
     elapsed = time.monotonic() - t0
     metrics.record_request("/v1/messages", elapsed, r.status_code)
+    log.info("rid=%s completed in %.3fs status=%d", rid, elapsed, r.status_code)
     result = openai_to_anthropic_response(data, payload.get("model", ""), settings.model_map)
     resp = Response(content=json.dumps(result), media_type="application/json")
     return _add_request_id(resp, request)
@@ -201,6 +210,8 @@ async def count_tokens(request: Request) -> Response:
         payload = json.loads(body)
     except json.JSONDecodeError:
         return make_error_response("invalid_request_error", "Invalid JSON", 400)
+    finally:
+        body = None
     if not isinstance(payload, dict):
         return make_error_response("invalid_request_error", "Request must be a JSON object", 400)
     msgs = payload.get("messages", [])
@@ -229,10 +240,25 @@ async def count_tokens(request: Request) -> Response:
             total_words += len(c.split())
         elif isinstance(c, list):
             for block in c:
-                if isinstance(block, dict):
-                    t = block.get("text", "") or block.get("content", "")
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    t = block.get("text", "")
                     if isinstance(t, str):
                         total_chars += len(t)
                         total_words += len(t.split())
+                elif btype == "tool_result":
+                    tc = block.get("content")
+                    if isinstance(tc, str):
+                        total_chars += len(tc)
+                        total_words += len(tc.split())
+                    elif isinstance(tc, list):
+                        for sub in tc:
+                            if isinstance(sub, dict) and sub.get("type") == "text":
+                                t = sub.get("text", "")
+                                if isinstance(t, str):
+                                    total_chars += len(t)
+                                    total_words += len(t.split())
     estimated = max(total_words, total_chars // 4)
     return Response(content=json.dumps({"input_tokens": estimated}), media_type="application/json")

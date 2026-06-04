@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- `inbound_api_key` setting: require API key on inbound `x-api-key` header
+- `log_format` setting placeholder in `init-config` template
+- Streaming requests now use `httpx_timeout(streaming=True)` (read=None) to avoid timeout on long streams
+- `429` (rate limit) responses are now retried alongside `5xx` errors
+- Respect `Retry-After` header on 429 responses during retry
+- Backoff cap at 30 seconds to avoid excessively long waits
+- `created_at` timestamp in both streaming and non-streaming responses
+- Reverse model mapping in responses (including streaming)
+- Request duration logged on successful requests
+- `--verbose`/`--quiet` CLI flags now correctly take effect (Settings passed via closure)
+
+### Changed
+- `inbound_api_key` comparison uses `hmac.compare_digest` to prevent timing attacks
+- CORS `allow_methods` and `allow_headers` restricted to specific values
+- `install-service` uses `shutil.which("claudify")` to find binary path
+- `retry_attempts` semantics: `>=1` triggers retry, `attempts+1` passed to retry functions
+- Assistant messages with `tool_calls` now set `content: null` (was empty string)
+- `top_k` passthrough now logs a warning
+- Request ID extended from 8 to 16 hex characters
+- Model name validated as non-empty string (max 256 chars)
+- `count_tokens` now counts system prompt and handles tool_result content blocks
+- `count_tokens` validates payload is a dict (no crash on non-dict input)
+- Unhandled error responses include request ID
+- `init-config` template expanded with missing settings
+
+### Fixed
+- `tool_choice: {"type": "none"}` now correctly maps to OpenAI `"none"`
+- Streaming response leak on 5xx after retries exhausted
+- README examples referenced non-existent CLI flags (`init-config --backend`, `install-service --api-key`)
+- Protocol mapping doc claimed reverse model mapping existed but was not implemented
+
+### Removed
+- Dead code: `_MAX_LATENCY` constant in metrics.py
+
 ## [0.1.0] - 2025-05-19
 
 ### Added

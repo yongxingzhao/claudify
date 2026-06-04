@@ -369,3 +369,105 @@ def test_synthetic_stop_events():
     delta_line = [line for line in events[0].split(b"\n") if line.startswith(b"data: ")][0]
     payload = json.loads(delta_line[len(b"data: "):])
     assert payload["delta"]["stop_reason"] == "end_turn"
+
+
+# ---------- T1: reverse model mapping --------------------------------------
+
+
+def test_reverse_model_mapping_in_response():
+    """When upstream returns a different model name, it should be reverse-mapped."""
+    resp = {
+        "id": "chatcmpl-1",
+        "model": "gpt-4",
+        "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+    }
+    model_map = {"claude-opus-4-7": "gpt-4"}
+    out = openai_to_anthropic_response(resp, "claude-opus-4-7", model_map)
+    # Upstream returned "gpt-4" which matches the map, should reverse-map
+    assert out["model"] == "claude-opus-4-7"
+
+
+def test_reverse_model_mapping_no_match():
+    """When upstream model is not in the map, return it as-is."""
+    resp = {
+        "model": "gpt-4o-mini",
+        "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+        "usage": {},
+    }
+    out = openai_to_anthropic_response(resp, "claude-opus-4-7", {"claude-opus-4-7": "gpt-4"})
+    assert out["model"] == "gpt-4o-mini"
+
+
+def test_response_includes_created_at():
+    resp = {
+        "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+        "usage": {},
+    }
+    out = openai_to_anthropic_response(resp, "m")
+    assert "created_at" in out
+    assert isinstance(out["created_at"], int)
+
+
+# ---------- T4: image conversion -------------------------------------------
+
+
+def test_image_base64_conversion():
+    from claudify.conversion import _image_block_to_openai_part
+    block = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGg=="},
+    }
+    part = _image_block_to_openai_part(block)
+    assert part is not None
+    assert part["type"] == "image_url"
+    assert part["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_image_url_conversion():
+    from claudify.conversion import _image_block_to_openai_part
+    block = {
+        "type": "image",
+        "source": {"type": "url", "url": "https://example.com/img.png"},
+    }
+    part = _image_block_to_openai_part(block)
+    assert part is not None
+    assert part["image_url"]["url"] == "https://example.com/img.png"
+
+
+def test_image_empty_data_returns_none():
+    from claudify.conversion import _image_block_to_openai_part
+    block = {"type": "image", "source": {"type": "base64", "data": ""}}
+    assert _image_block_to_openai_part(block) is None
+
+
+def test_image_unknown_source_returns_none():
+    from claudify.conversion import _image_block_to_openai_part
+    block = {"type": "image", "source": {"type": "embedded"}}
+    assert _image_block_to_openai_part(block) is None
+
+
+# ---------- T6: is_error tool_result ---------------------------------------
+
+
+def test_tool_result_is_error():
+    payload = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tu_1", "name": "fn", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "tu_1", "content": "error msg", "is_error": True},
+                ],
+            },
+        ],
+    }
+    out = anthropic_to_openai(payload, {})
+    tool_msgs = [m for m in out["messages"] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["content"].startswith("[tool_error]")

@@ -20,9 +20,9 @@ else:
 log = logging.getLogger("claudify.settings")
 
 _VALID_FIELDS = {
-    "backend_base", "api_key", "inbound_api_key", "host", "port", "log_level",
+    "backend_base", "api_key", "inbound_api_key", "host", "port", "log_level", "log_format",
     "request_timeout", "connect_timeout", "read_timeout", "write_timeout", "pool_timeout",
-    "retry_attempts", "retry_backoff", "max_body_size",
+    "retry_attempts", "retry_backoff", "max_body_size", "pool_limit",
     "model_map", "default_model", "cors_origins", "upstream_health_path",
 }
 
@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=4000)
     log_level: str = Field(default="INFO")
+    log_format: str = Field(default="text")
 
     request_timeout: float = Field(default=300.0)
     connect_timeout: float | None = Field(default=None)
@@ -57,6 +58,7 @@ class Settings(BaseSettings):
     retry_backoff: float = Field(default=0.5, ge=0.0)
 
     max_body_size: int = Field(default=10 * 1024 * 1024, ge=0)  # 10 MB
+    pool_limit: int = Field(default=100, ge=1)
 
     model_map: dict[str, str] = Field(default_factory=dict)
     default_model: str = Field(default="")

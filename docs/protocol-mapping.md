@@ -61,7 +61,7 @@ This document describes how claudify translates between the Anthropic Messages A
 | `usage.prompt_tokens` | `usage.input_tokens` | |
 | `usage.completion_tokens` | `usage.output_tokens` | |
 | `model` | `model` | Reverse-mapped through model_map if upstream returns a different model name |
-| `id` | `id` | Prefixed with `msg_` if not already |
+| `id` | `id` | New `msg_`-prefixed UUID generated; upstream ID not preserved |
 
 ### Finish Reason Mapping
 
@@ -78,7 +78,7 @@ This document describes how claudify translates between the Anthropic Messages A
 |--------|-----------|-------|
 | `content` (string) | `[{type: "text", text: ...}]` | Wrapped in text block |
 | `tool_calls[]` | `[{type: "tool_use", ...}]` | Arguments: JSON string → dict |
-| Empty content + tool_calls | `[{type: "text", text: ""}]` | Preserved |
+| Empty content + tool_calls | `[{type: "tool_use", ...}]` | No text block when content is empty |
 
 ### Streaming
 

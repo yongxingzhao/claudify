@@ -78,9 +78,15 @@ def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
             if isinstance(tc, str):
                 tool_text = tc
             elif isinstance(tc, list):
-                tool_text = "\n".join(
-                    sub.get("text", "") for sub in tc if isinstance(sub, dict) and sub.get("type") == "text"
-                )
+                text_parts_list: list[str] = []
+                for sub in tc:
+                    if not isinstance(sub, dict):
+                        continue
+                    if sub.get("type") == "text":
+                        text_parts_list.append(sub.get("text", ""))
+                    elif sub.get("type") == "image":
+                        log.warning("image in tool_result is not supported by OpenAI; dropping")
+                tool_text = "\n".join(text_parts_list)
             else:
                 tool_text = ""
             if clean_block.get("is_error"):
@@ -333,8 +339,14 @@ def openai_to_anthropic_response(
 async def stream_openai_to_anthropic(
     openai_stream: AsyncIterator[bytes],
     original_model: str,
+    model_map: dict[str, str] | None = None,
 ) -> AsyncIterator[bytes]:
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+
+    # Reverse-map model for streaming response (consistent with non-streaming)
+    display_model = original_model
+    if model_map:
+        display_model = _reverse_map_model(original_model, model_map) or original_model
 
     yield sse_event(
         "message_start",
@@ -344,7 +356,7 @@ async def stream_openai_to_anthropic(
                 "id": msg_id,
                 "type": "message",
                 "role": "assistant",
-                "model": original_model,
+                "model": display_model,
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
@@ -418,7 +430,7 @@ async def stream_openai_to_anthropic(
                             "block_index": next_index,
                             "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
                             "name": fn.get("name", ""),
-                            "args": "",
+                            "args_pieces": [],
                         }
                         tool_state[up_idx] = state
                         next_index += 1
@@ -438,7 +450,7 @@ async def stream_openai_to_anthropic(
                     fn = tc.get("function") or {}
                     args_piece = fn.get("arguments", "")
                     if args_piece:
-                        state["args"] += args_piece
+                        state["args_pieces"].append(args_piece)
                         yield sse_event(
                             "content_block_delta",
                             {
@@ -459,6 +471,8 @@ async def stream_openai_to_anthropic(
                 "content_block_stop",
                 {"type": "content_block_stop", "index": text_block_index},
             )
+        for state in tool_state.values():
+            state["args"] = "".join(state.pop("args_pieces"))
         for _ev in synthetic_stop_events(finish_reason, upstream_usage):
             yield _ev
         return

@@ -57,7 +57,7 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:4000
 - 工具调用（tool_use / tool_result）双向映射
 - 图片内容（base64 + URL）转换
 - 可配置模型映射（model_map）
-- 自动重试（502/503/504）+ 指数退避
+- 自动重试（502/503/504/429）+ 指数退避（上限 30 秒）
 - Prometheus 指标（/metrics）
 - 结构化日志 + 请求 ID 追踪
 - macOS / Linux 系统服务安装
@@ -104,6 +104,7 @@ default_model = "hermes-agent"
 |------|----------|--------|------|
 | `backend_base` | `CLAUDIFY_BACKEND_BASE` | `http://127.0.0.1:8000/v1` | OpenAI 兼容后端地址 |
 | `api_key` | `CLAUDIFY_API_KEY` | _(空)_ | 发送到上游的 Bearer token |
+| `inbound_api_key` | `CLAUDIFY_INBOUND_API_KEY` | _(空)_ | 设置后要求入站请求携带匹配的 `x-api-key` 头 |
 | `host` | `CLAUDIFY_HOST` | `127.0.0.1` | 监听地址 |
 | `port` | `CLAUDIFY_PORT` | `4000` | 监听端口 |
 | `connect_timeout` | `CLAUDIFY_CONNECT_TIMEOUT` | _(同 request_timeout)_ | 连接超时（秒） |
@@ -111,11 +112,13 @@ default_model = "hermes-agent"
 | `write_timeout` | `CLAUDIFY_WRITE_TIMEOUT` | _(同 request_timeout)_ | 写入超时（秒） |
 | `pool_timeout` | `CLAUDIFY_POOL_TIMEOUT` | _(同 request_timeout)_ | 连接池超时（秒） |
 | `request_timeout` | `CLAUDIFY_REQUEST_TIMEOUT` | `300.0` | 未设置的超时字段的兜底值 |
-| `retry_attempts` | `CLAUDIFY_RETRY_ATTEMPTS` | `0` | 5xx 错误最大重试次数 |
-| `retry_backoff` | `CLAUDIFY_RETRY_BACKOFF` | `0.5` | 初始退避时间（秒），每次翻倍 |
+| `retry_attempts` | `CLAUDIFY_RETRY_ATTEMPTS` | `0` | 5xx/429 错误最大重试次数（首次请求之后） |
+| `retry_backoff` | `CLAUDIFY_RETRY_BACKOFF` | `0.5` | 初始退避时间（秒），每次翻倍（上限 30 秒） |
 | `default_model` | `CLAUDIFY_DEFAULT_MODEL` | _(空)_ | 未知模型使用的默认模型 |
 | `model_map` | _(仅 TOML)_ | `{}` | Anthropic 模型名 → 上游模型名映射 |
 | `cors_origins` | _(仅 TOML)_ | `[]` | CORS 允许的来源列表 |
+| `max_body_size` | `CLAUDIFY_MAX_BODY_SIZE` | `10485760` | 最大请求体大小（字节） |
+| `upstream_health_path` | `CLAUDIFY_UPSTREAM_HEALTH_PATH` | _(空)_ | 上游健康检查路径 |
 
 ## 已知不支持
 
@@ -130,7 +133,7 @@ default_model = "hermes-agent"
 ## 系统服务
 
 ```bash
-claudify install-service --backend http://127.0.0.1:8000/v1 --api-key YOUR_KEY
+claudify install-service --backend http://127.0.0.1:8000/v1
 ```
 
 - **Linux（systemd）：** 写入 `~/.config/systemd/user/claudify.service`，然后 `systemctl --user enable --now claudify`。
@@ -163,7 +166,7 @@ src/claudify/
 ├── app.py              # FastAPI 应用工厂 + 中间件
 ├── cli.py              # Typer CLI（claudify 命令行）
 └── service/
-    ├── __init__.py     # 平台分发
+    ├── __init__.py  # (空文件)
     ├── systemd.py      # Linux 用户级 unit 安装器
     └── launchd.py      # macOS launchd 安装器
 ```

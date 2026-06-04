@@ -42,6 +42,10 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
     client = http_client or httpx.AsyncClient(
         base_url=settings.backend_base,
         timeout=settings.httpx_timeout(),
+        limits=httpx.Limits(
+            max_connections=settings.pool_limit,
+            max_keepalive_connections=20,
+        ),
     )
 
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:

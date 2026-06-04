@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 from pathlib import Path
@@ -130,17 +131,25 @@ def run(
     elif quiet:
         s.log_level = "WARNING"
 
-    import logging
     logging.basicConfig(level=getattr(logging, s.log_level.upper(), logging.INFO))
 
     if s.model_map:
         typer.echo(f"Model map: {s.model_map}")
     if s.default_model:
         typer.echo(f"Default model: {s.default_model}")
-
+    if s.retry_attempts:
+        typer.echo(f"Retry: {s.retry_attempts} attempts, {s.retry_backoff}s backoff")
+    if s.inbound_api_key:
+        typer.echo("Inbound auth: enabled")
     typer.echo(f"forwarding to {s.backend_base}")
+
+    # Pass the already-loaded Settings to create_app via closure,
+    # so --verbose/--quiet flags and config overrides take effect.
+    from claudify.app import create_app
+    app_factory = lambda s=s: create_app(s)  # noqa: E731
+
     uvicorn.run(
-        "claudify.app:create_app",
+        app_factory,
         host=h,
         port=p,
         factory=True,

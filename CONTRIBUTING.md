@@ -10,7 +10,7 @@ git clone https://github.com/yongxingzhao/claudify.git
 cd claudify
 
 # Install with dev dependencies
-uv sync --dev
+uv sync --group dev
 
 # Run tests
 uv run pytest
@@ -33,6 +33,7 @@ src/claudify/
 ├── settings.py     # Configuration (pydantic-settings)
 ├── cli.py          # Typer CLI
 └── service/
+    ├── __init__.py  # (empty)
     ├── systemd.py  # Linux systemd installer
     └── launchd.py  # macOS launchd installer
 ```

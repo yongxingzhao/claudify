@@ -5,6 +5,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from claudify.settings import Settings
+
 
 @pytest.mark.anyio
 async def test_messages_non_stream(make_client, chat_response):
@@ -475,4 +477,131 @@ async def test_count_tokens_with_system_prompt(make_client):
     })
     tokens_without_system = r2.json()["input_tokens"]
     assert tokens_with_system > tokens_without_system
+    await client.aclose()
+
+
+# ---------- T2: streaming retry test ---------------------------------------
+
+
+@pytest.mark.anyio
+async def test_stream_retry_on_503(make_client):
+    """Streaming requests should retry on 503 and succeed."""
+    call_count = 0
+
+    def handler(request):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            return httpx.Response(503, json={"error": {"message": "overloaded"}})
+        # Return a valid streaming response
+        chunks = [
+            {"id": "chatcmpl-1", "choices": [{"delta": {"role": "assistant"}, "index": 0}]},
+            {"id": "chatcmpl-1", "choices": [{"delta": {"content": "ok"}, "index": 0}]},
+            {"id": "chatcmpl-1", "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            {"id": "chatcmpl-1", "choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+        ]
+        lines = []
+        import json as _json
+        for c in chunks:
+            lines.append(f"data: {_json.dumps(c)}")
+        lines.append("data: [DONE]")
+        content = "\n\n".join(lines) + "\n\n"
+        return httpx.Response(200, content=content.encode(), headers={"content-type": "text/event-stream"})
+
+    client, _ = make_client(handler, retry_attempts=3, retry_backoff=0.01)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+    })
+    assert r.status_code == 200
+    assert call_count == 3
+    await client.aclose()
+
+
+# ---------- T3: connection error and timeout tests -------------------------
+
+
+@pytest.mark.anyio
+async def test_upstream_connect_error(make_client, chat_response):
+    """ConnectError should return 502."""
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    # MockTransport doesn't raise exceptions, so we need a different approach.
+    # Use a custom transport that raises on request.
+    s = Settings(
+        backend_base="http://test-backend/v1",
+        api_key="test-key",
+        model_map={"claude-opus-4-7": "hermes-agent"},
+    )
+    # We'll test the error handler directly via a transport that raises
+    import httpx as _httpx
+
+    from claudify.app import create_app
+
+    class ConnectErrorTransport(_httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise _httpx.ConnectError("connection refused")
+
+    mock_client = _httpx.AsyncClient(transport=ConnectErrorTransport(), base_url=s.backend_base)
+    app = create_app(s, http_client=mock_client)
+    asgi_transport = _httpx.ASGITransport(app=app)
+    client = _httpx.AsyncClient(transport=asgi_transport, base_url="http://test")
+
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 502
+    assert r.json()["error"]["type"] == "upstream_unavailable"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_upstream_timeout(make_client):
+    """TimeoutException should return 504."""
+    s = Settings(
+        backend_base="http://test-backend/v1",
+        api_key="test-key",
+        model_map={"claude-opus-4-7": "hermes-agent"},
+    )
+    import httpx as _httpx
+
+    from claudify.app import create_app
+
+    class TimeoutTransport(_httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            raise _httpx.TimeoutException("read timeout")
+
+    mock_client = _httpx.AsyncClient(transport=TimeoutTransport(), base_url=s.backend_base)
+    app = create_app(s, http_client=mock_client)
+    asgi_transport = _httpx.ASGITransport(app=app)
+    client = _httpx.AsyncClient(transport=asgi_transport, base_url="http://test")
+
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 504
+    assert r.json()["error"]["type"] == "timeout_error"
+    await client.aclose()
+
+
+# ---------- T7: Bearer token sanitization test -----------------------------
+
+
+@pytest.mark.anyio
+async def test_bearer_token_sanitization(make_client):
+    def handler(request):
+        return httpx.Response(500, json={"error": {"message": "Invalid Bearer sk-supersecret123 token"}})
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 500
+    msg = r.json()["error"]["message"]
+    assert "sk-supersecret123" not in msg
+    assert "[REDACTED]" in msg
     await client.aclose()
