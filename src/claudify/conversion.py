@@ -374,13 +374,17 @@ async def stream_openai_to_anthropic(
     tool_state: dict[int, dict[str, Any]] = {}
 
     parser = SSEParser()
+    last_ping_time = 0.0
+    ping_interval = 5.0  # seconds between keepalive pings
 
     try:
         async for raw in openai_stream:
             if parser.done:
                 break
             chunks = parser.feed(raw)
+            had_data = False
             for chunk in chunks:
+                had_data = True
                 if isinstance(chunk.get("usage"), dict):
                     upstream_usage = chunk["usage"]
 
@@ -463,7 +467,10 @@ async def stream_openai_to_anthropic(
                 if choice0.get("finish_reason"):
                     finish_reason = choice0["finish_reason"]
 
-            yield sse_ping()
+            now = time.monotonic()
+            if not had_data or (now - last_ping_time) >= ping_interval:
+                yield sse_ping()
+                last_ping_time = now
 
     except Exception:
         if text_block_open:
