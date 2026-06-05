@@ -14,7 +14,13 @@ import httpx
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
-from claudify.conversion import anthropic_to_openai, openai_to_anthropic_response, stream_openai_to_anthropic
+from claudify.conversion import (
+    _system_to_openai,
+    anthropic_to_openai,
+    extract_text_from_blocks,
+    openai_to_anthropic_response,
+    stream_openai_to_anthropic,
+)
 from claudify.errors import make_error_response, passthrough_error
 from claudify.metrics import Metrics
 from claudify.retry import post_with_retry, stream_with_retry
@@ -86,17 +92,126 @@ def _add_request_id(response: Response, request: Request) -> Response:
     return response
 
 
+def _check_inbound_auth(request: Request, settings: Settings) -> Response | None:
+    """Validate inbound API key if configured. Returns error response or None."""
+    if settings.inbound_api_key:
+        key = request.headers.get("x-api-key") or ""
+        if not hmac.compare_digest(key, settings.inbound_api_key):
+            return make_error_response("authentication_error", "Invalid API key", 401)
+    return None
+
+
+async def _stream_response(
+    rid: str, r: httpx.Response, payload: dict[str, Any],
+    t0: float, metrics: Metrics,
+) -> AsyncIterator[bytes]:
+    """Yield SSE chunks from an OpenAI streaming response, converting to Anthropic format."""
+    try:
+        async for chunk in stream_openai_to_anthropic(
+            r.aiter_bytes(), payload.get("model", ""),
+        ):
+            yield chunk
+    except Exception:
+        log.warning("rid=%s stream interrupted", rid, exc_info=True)
+        for ev in synthetic_stop_events("stop", None):
+            yield ev
+    finally:
+        await r.aclose()
+        stream_elapsed = time.monotonic() - t0
+        metrics.record_request("/v1/messages", stream_elapsed, r.status_code)
+        log.info("rid=%s stream completed in %.3fs status=%d", rid, stream_elapsed, r.status_code)
+
+
+def _upstream_error_response(
+    exc: Exception, rid: str, t0: float, metrics: Metrics,
+) -> Response:
+    """Convert an upstream httpx exception into an error Response with metrics."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        elapsed = time.monotonic() - t0
+        metrics.record_request("/v1/messages", elapsed, exc.response.status_code)
+        log.warning("rid=%s upstream %d", rid, exc.response.status_code)
+        return passthrough_error(exc.response.status_code, exc.response.content)
+    if isinstance(exc, httpx.TimeoutException):
+        elapsed = time.monotonic() - t0
+        metrics.record_request("/v1/messages", elapsed, 504)
+        log.error("rid=%s upstream timeout: %s", rid, exc)
+        return passthrough_error(504)
+    # ConnectError, ReadError, WriteError
+    elapsed = time.monotonic() - t0
+    metrics.record_request("/v1/messages", elapsed, 502)
+    log.error("rid=%s upstream unavailable: %s", rid, exc)
+    return passthrough_error(502)
+
+
+async def _handle_streaming(
+    request: Request, client: httpx.AsyncClient, payload: dict[str, Any],
+    openai_payload: dict[str, Any], headers: dict[str, str],
+    settings: Settings, metrics: Metrics, rid: str, t0: float,
+) -> Response:
+    """Handle a streaming messages request."""
+    req = client.build_request(
+        "POST", "/chat/completions", json=openai_payload, headers=headers,
+        timeout=settings.httpx_timeout(streaming=True),
+    )
+    try:
+        if settings.retry_attempts >= 1:
+            r, retried = await stream_with_retry(
+                client, req, settings.retry_attempts + 1, settings.retry_backoff,
+            )
+            if retried:
+                log.info("rid=%s stream succeeded after retry", rid)
+        else:
+            r = await client.send(req, stream=True)
+        r.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        resp = _upstream_error_response(exc, rid, t0, metrics)
+        await exc.response.aclose()
+        return _add_request_id(resp, request)
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
+        return _add_request_id(_upstream_error_response(exc, rid, t0, metrics), request)
+
+    resp = StreamingResponse(
+        _stream_response(rid, r, payload, t0, metrics),
+        media_type="text/event-stream",
+    )
+    return _add_request_id(resp, request)
+
+
+async def _handle_nonstreaming(
+    request: Request, client: httpx.AsyncClient, payload: dict[str, Any],
+    openai_payload: dict[str, Any], headers: dict[str, str],
+    settings: Settings, metrics: Metrics, rid: str, t0: float,
+) -> Response:
+    """Handle a non-streaming messages request."""
+    req = client.build_request("POST", "/chat/completions", json=openai_payload, headers=headers)
+    try:
+        if settings.retry_attempts >= 1:
+            r = await post_with_retry(
+                client, req, settings.retry_attempts + 1, settings.retry_backoff,
+            )
+        else:
+            r = await client.send(req)
+        r.raise_for_status()
+        data = r.json()
+    except (httpx.HTTPStatusError, httpx.TimeoutException,
+            httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
+        return _add_request_id(_upstream_error_response(exc, rid, t0, metrics), request)
+
+    elapsed = time.monotonic() - t0
+    metrics.record_request("/v1/messages", elapsed, r.status_code)
+    log.info("rid=%s completed in %.3fs status=%d", rid, elapsed, r.status_code)
+    result = openai_to_anthropic_response(data, payload.get("model", ""), settings.model_map)
+    resp = Response(content=json.dumps(result), media_type="application/json")
+    return _add_request_id(resp, request)
+
+
 async def messages(request: Request, client: httpx.AsyncClient, settings: Settings, metrics: Metrics) -> Response:
     t0 = time.monotonic()
     rid = getattr(request.state, "request_id", "")
 
-    # Optional inbound authentication
-    if settings.inbound_api_key:
-        key = request.headers.get("x-api-key") or ""
-        if not hmac.compare_digest(key, settings.inbound_api_key):
-            return _add_request_id(
-                make_error_response("authentication_error", "Invalid API key", 401), request,
-            )
+    auth_err = _check_inbound_auth(request, settings)
+    if auth_err:
+        return _add_request_id(auth_err, request)
 
     body = await request.body()
     payload, err = _validate_messages_payload(body, settings)
@@ -106,84 +221,13 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
 
     openai_payload = anthropic_to_openai(payload, settings.model_map, settings.default_model)
     is_stream = openai_payload.get("stream", False)
-    upstream_path = "/chat/completions"
     headers = _build_headers(request, settings)
 
     log.info("rid=%s model=%s -> %s stream=%s", rid, payload.get("model"), openai_payload.get("model"), is_stream)
 
     if is_stream:
-        req = client.build_request(
-            "POST", upstream_path, json=openai_payload, headers=headers,
-            timeout=settings.httpx_timeout(streaming=True),
-        )
-    else:
-        req = client.build_request("POST", upstream_path, json=openai_payload, headers=headers)
-
-    try:
-        if is_stream:
-            if settings.retry_attempts >= 1:
-                r, retried = await stream_with_retry(
-                    client, req, settings.retry_attempts + 1, settings.retry_backoff,
-                )
-                if retried:
-                    log.info("rid=%s stream succeeded after retry", rid)
-            else:
-                r = await client.send(req, stream=True)
-            r.raise_for_status()
-
-            async def _generate() -> AsyncIterator[bytes]:
-                try:
-                    async for chunk in stream_openai_to_anthropic(
-                        r.aiter_bytes(), payload.get("model", ""),
-                    ):
-                        yield chunk
-                except Exception:
-                    log.warning("rid=%s stream interrupted", rid, exc_info=True)
-                    for ev in synthetic_stop_events("stop", None):
-                        yield ev
-                finally:
-                    await r.aclose()
-                    stream_elapsed = time.monotonic() - t0
-                    metrics.record_request("/v1/messages", stream_elapsed, r.status_code)
-                    log.info("rid=%s stream completed in %.3fs status=%d", rid, stream_elapsed, r.status_code)
-
-            resp = StreamingResponse(_generate(), media_type="text/event-stream")
-            return _add_request_id(resp, request)
-        else:
-            if settings.retry_attempts >= 1:
-                r = await post_with_retry(
-                    client, req, settings.retry_attempts + 1, settings.retry_backoff,
-                )
-            else:
-                r = await client.send(req)
-            r.raise_for_status()
-            data = r.json()
-
-    except httpx.HTTPStatusError as exc:
-        elapsed = time.monotonic() - t0
-        metrics.record_request("/v1/messages", elapsed, exc.response.status_code)
-        log.warning("rid=%s upstream %d", rid, exc.response.status_code)
-        resp = passthrough_error(exc.response.status_code, exc.response.content)
-        if is_stream:
-            await exc.response.aclose()
-        return _add_request_id(resp, request)
-    except httpx.TimeoutException as exc:
-        elapsed = time.monotonic() - t0
-        metrics.record_request("/v1/messages", elapsed, 504)
-        log.error("rid=%s upstream timeout: %s", rid, exc)
-        return _add_request_id(passthrough_error(504), request)
-    except (httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
-        elapsed = time.monotonic() - t0
-        metrics.record_request("/v1/messages", elapsed, 502)
-        log.error("rid=%s upstream unavailable: %s", rid, exc)
-        return _add_request_id(passthrough_error(502), request)
-
-    elapsed = time.monotonic() - t0
-    metrics.record_request("/v1/messages", elapsed, r.status_code)
-    log.info("rid=%s completed in %.3fs status=%d", rid, elapsed, r.status_code)
-    result = openai_to_anthropic_response(data, payload.get("model", ""), settings.model_map)
-    resp = Response(content=json.dumps(result), media_type="application/json")
-    return _add_request_id(resp, request)
+        return await _handle_streaming(request, client, payload, openai_payload, headers, settings, metrics, rid, t0)
+    return await _handle_nonstreaming(request, client, payload, openai_payload, headers, settings, metrics, rid, t0)
 
 
 async def list_models(settings: Settings) -> dict[str, Any]:
@@ -218,11 +262,9 @@ async def metrics_endpoint(metrics: Metrics) -> Response:
 
 
 async def count_tokens(request: Request, settings: Settings) -> Response:
-    # Optional inbound authentication (same as /v1/messages)
-    if settings.inbound_api_key:
-        key = request.headers.get("x-api-key") or ""
-        if not hmac.compare_digest(key, settings.inbound_api_key):
-            return make_error_response("authentication_error", "Invalid API key", 401)
+    auth_err = _check_inbound_auth(request, settings)
+    if auth_err:
+        return auth_err
 
     body = await request.body()
     try:
@@ -251,11 +293,9 @@ async def count_tokens(request: Request, settings: Settings) -> Response:
     if isinstance(system, str) and system:
         _count_text(system)
     elif isinstance(system, list):
-        from claudify.conversion import _system_to_openai
         _count_text(_system_to_openai(system))
 
     # Count messages using shared extraction
-    from claudify.conversion import extract_text_from_blocks
     for m in msgs:
         if isinstance(m, dict):
             _count_text(extract_text_from_blocks(m.get("content")))

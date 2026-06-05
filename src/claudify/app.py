@@ -76,7 +76,7 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> Response:
         rid = getattr(request.state, "request_id", "")
-        log.exception("rid=%s unhandled error", rid)
+        log.exception("rid=%s unhandled %s error", rid, type(exc).__name__)
         return make_error_response("api_error", f"internal error (rid={rid})" if rid else "internal error", 500)
 
     @app.post("/v1/messages")

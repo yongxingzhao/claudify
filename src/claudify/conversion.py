@@ -329,6 +329,116 @@ def openai_to_anthropic_response(
     return result
 
 
+def _handle_text_delta(
+    piece: str, events: list[bytes], *,
+    text_block_open: bool, text_block_index: int, next_index: int,
+) -> tuple[int, int, bool]:
+    """Append text content_block_start/delta events. Return updated indices."""
+    if not text_block_open:
+        events.append(sse_event(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": next_index,
+                "content_block": {"type": "text", "text": ""},
+            },
+        ))
+        text_block_open = True
+        text_block_index = next_index
+        next_index += 1
+    events.append(sse_event(
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": text_block_index,
+            "delta": {"type": "text_delta", "text": piece},
+        },
+    ))
+    return next_index, text_block_index, text_block_open
+
+
+def _handle_tool_call(
+    tc: dict[str, Any], events: list[bytes], *,
+    tool_state: dict[int, dict[str, Any]],
+    text_block_open: bool, text_block_index: int, next_index: int,
+) -> tuple[int, bool]:
+    """Append tool call content_block_start/delta events. Return updated next_index and text_block_open."""
+    up_idx = tc.get("index", 0)
+    state = tool_state.get(up_idx)
+    if state is None:
+        if text_block_open:
+            events.append(sse_event(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": text_block_index},
+            ))
+            text_block_open = False
+        fn = tc.get("function") or {}
+        state = {
+            "block_index": next_index,
+            "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
+            "name": fn.get("name", ""),
+            "args_pieces": [],
+        }
+        tool_state[up_idx] = state
+        next_index += 1
+        events.append(sse_event(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": state["block_index"],
+                "content_block": {
+                    "type": "tool_use",
+                    "id": state["id"],
+                    "name": state["name"],
+                    "input": {},
+                },
+            },
+        ))
+    fn = tc.get("function") or {}
+    args_piece = fn.get("arguments", "")
+    if args_piece:
+        state["args_pieces"].append(args_piece)
+        events.append(sse_event(
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": state["block_index"],
+                "delta": {"type": "input_json_delta", "partial_json": args_piece},
+            },
+        ))
+    return next_index, text_block_open
+
+
+def _build_finalization_events(
+    text_block_open: bool, text_block_index: int,
+    tool_state: dict[int, dict[str, Any]],
+    finish_reason: str, upstream_usage: dict[str, Any] | None,
+) -> list[bytes]:
+    """Build the closing content_block_stop, message_delta, and message_stop events."""
+    events: list[bytes] = []
+    if text_block_open:
+        events.append(sse_event(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": text_block_index},
+        ))
+    for state in tool_state.values():
+        events.append(sse_event(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": state["block_index"]},
+        ))
+    stop_reason = STOP_REASON_MAP.get(finish_reason, "end_turn")
+    events.append(sse_event(
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+            "usage": extract_usage(upstream_usage),
+        },
+    ))
+    events.append(sse_event("message_stop", {"type": "message_stop"}))
+    return events
+
+
 async def stream_openai_to_anthropic(
     openai_stream: AsyncIterator[bytes],
     original_model: str,
@@ -383,76 +493,30 @@ async def stream_openai_to_anthropic(
                     continue
                 choice0 = choices[0]
                 delta = choice0.get("delta") or {}
+                buf: list[bytes] = []
 
                 piece = delta.get("content")
                 if piece is not None:
-                    if not text_block_open:
-                        yield sse_event(
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": next_index,
-                                "content_block": {"type": "text", "text": ""},
-                            },
-                        )
-                        text_block_open = True
-                        text_block_index = next_index
-                        next_index += 1
-                    yield sse_event(
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": text_block_index,
-                            "delta": {"type": "text_delta", "text": piece},
-                        },
+                    next_index, text_block_index, text_block_open = _handle_text_delta(
+                        piece, buf,
+                        text_block_open=text_block_open,
+                        text_block_index=text_block_index,
+                        next_index=next_index,
                     )
 
                 for tc in delta.get("tool_calls") or []:
                     if not isinstance(tc, dict):
                         continue
-                    up_idx = tc.get("index", 0)
-                    state = tool_state.get(up_idx)
-                    if state is None:
-                        if text_block_open:
-                            yield sse_event(
-                                "content_block_stop",
-                                {"type": "content_block_stop", "index": text_block_index},
-                            )
-                            text_block_open = False
-                        fn = tc.get("function") or {}
-                        state = {
-                            "block_index": next_index,
-                            "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
-                            "name": fn.get("name", ""),
-                            "args_pieces": [],
-                        }
-                        tool_state[up_idx] = state
-                        next_index += 1
-                        yield sse_event(
-                            "content_block_start",
-                            {
-                                "type": "content_block_start",
-                                "index": state["block_index"],
-                                "content_block": {
-                                    "type": "tool_use",
-                                    "id": state["id"],
-                                    "name": state["name"],
-                                    "input": {},
-                                },
-                            },
-                        )
-                    fn = tc.get("function") or {}
-                    args_piece = fn.get("arguments", "")
-                    if args_piece:
-                        state["args_pieces"].append(args_piece)
-                        yield sse_event(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": state["block_index"],
-                                "delta": {"type": "input_json_delta", "partial_json": args_piece},
-                            },
-                        )
+                    next_index, text_block_open = _handle_tool_call(
+                        tc, buf,
+                        tool_state=tool_state,
+                        text_block_open=text_block_open,
+                        text_block_index=text_block_index,
+                        next_index=next_index,
+                    )
+
+                for ev in buf:
+                    yield ev
 
                 if choice0.get("finish_reason"):
                     finish_reason = choice0["finish_reason"]
@@ -463,6 +527,7 @@ async def stream_openai_to_anthropic(
                 last_ping_time = now
 
     except Exception:
+        # On error, close any open blocks and emit synthetic stop
         if text_block_open:
             yield sse_event(
                 "content_block_stop",
@@ -477,24 +542,7 @@ async def stream_openai_to_anthropic(
             yield _ev
         return
 
-    if text_block_open:
-        yield sse_event(
-            "content_block_stop",
-            {"type": "content_block_stop", "index": text_block_index},
-        )
-    for state in tool_state.values():
-        yield sse_event(
-            "content_block_stop",
-            {"type": "content_block_stop", "index": state["block_index"]},
-        )
-
-    stop_reason = STOP_REASON_MAP.get(finish_reason, "end_turn")
-    yield sse_event(
-        "message_delta",
-        {
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": extract_usage(upstream_usage),
-        },
-    )
-    yield sse_event("message_stop", {"type": "message_stop"})
+    for ev in _build_finalization_events(
+        text_block_open, text_block_index, tool_state, finish_reason, upstream_usage,
+    ):
+        yield ev
