@@ -44,7 +44,8 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
         timeout=settings.httpx_timeout(),
         limits=httpx.Limits(
             max_connections=settings.pool_limit,
-            max_keepalive_connections=min(20, settings.pool_limit),
+            max_keepalive_connections=settings.pool_limit,
+            keepalive_expiry=30.0,
         ),
     )
 

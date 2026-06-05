@@ -267,6 +267,8 @@ async def count_tokens(request: Request, settings: Settings) -> Response:
         return auth_err
 
     body = await request.body()
+    if len(body) > settings.max_body_size:
+        return make_error_response("invalid_request_error", "Request body too large", 413)
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:

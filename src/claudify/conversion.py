@@ -9,17 +9,21 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
-from claudify.sse import STOP_REASON_MAP, SSEParser, extract_usage, sse_event, sse_ping, synthetic_stop_events
+from claudify.sse import (
+    _MESSAGE_STOP_EVENT,
+    STOP_REASON_MAP,
+    SSEParser,
+    extract_usage,
+    sse_event,
+    sse_ping,
+    synthetic_stop_events,
+)
 
 log = logging.getLogger("claudify.conversion")
 
 
 def map_model(model: str, model_map: dict[str, str], default: str = "") -> str:
-    if model in model_map:
-        return model_map[model]
-    if default:
-        return default
-    return model
+    return model_map.get(model, default or model)
 
 
 def _image_block_to_openai_part(block: dict[str, Any]) -> dict[str, Any] | None:
@@ -65,7 +69,8 @@ def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
-        clean_block = {k: v for k, v in block.items() if k != "cache_control"}
+        # Only copy the dict when cache_control is present (common case avoids allocation)
+        clean_block = block if "cache_control" not in block else {k: v for k, v in block.items() if k != "cache_control"}
         if btype == "text":
             text = clean_block.get("text", "")
             parts.append({"type": "text", "text": text})
@@ -435,7 +440,7 @@ def _build_finalization_events(
             "usage": extract_usage(upstream_usage),
         },
     ))
-    events.append(sse_event("message_stop", {"type": "message_stop"}))
+    events.append(_MESSAGE_STOP_EVENT)
     return events
 
 
@@ -476,6 +481,8 @@ async def stream_openai_to_anthropic(
     parser = SSEParser()
     last_ping_time = 0.0
     ping_interval = 5.0  # seconds between keepalive pings
+    # Reusable buffer list — cleared per chunk instead of re-allocated
+    _ev_buf: list[bytes] = []
 
     try:
         async for raw in openai_stream:
@@ -493,12 +500,12 @@ async def stream_openai_to_anthropic(
                     continue
                 choice0 = choices[0]
                 delta = choice0.get("delta") or {}
-                buf: list[bytes] = []
+                _ev_buf.clear()
 
                 piece = delta.get("content")
                 if piece is not None:
                     next_index, text_block_index, text_block_open = _handle_text_delta(
-                        piece, buf,
+                        piece, _ev_buf,
                         text_block_open=text_block_open,
                         text_block_index=text_block_index,
                         next_index=next_index,
@@ -508,14 +515,14 @@ async def stream_openai_to_anthropic(
                     if not isinstance(tc, dict):
                         continue
                     next_index, text_block_open = _handle_tool_call(
-                        tc, buf,
+                        tc, _ev_buf,
                         tool_state=tool_state,
                         text_block_open=text_block_open,
                         text_block_index=text_block_index,
                         next_index=next_index,
                     )
 
-                for ev in buf:
+                for ev in _ev_buf:
                     yield ev
 
                 if choice0.get("finish_reason"):

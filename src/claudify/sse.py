@@ -16,6 +16,9 @@ def sse_ping() -> bytes:
 
 STOP_REASON_MAP: dict[str, str] = {"stop": "end_turn", "length": "max_tokens", "tool_calls": "tool_use"}
 
+# Pre-computed static SSE events reused on every stream
+_MESSAGE_STOP_EVENT = sse_event("message_stop", {"type": "message_stop"})
+
 
 def extract_usage(upstream_usage: dict[str, Any] | None) -> dict[str, Any]:
     if upstream_usage:
@@ -29,13 +32,26 @@ def extract_usage(upstream_usage: dict[str, Any] | None) -> dict[str, Any]:
 class SSEParser:
     """Incremental SSE stream parser that handles chunk boundaries correctly."""
 
-    def __init__(self) -> None:
-        self._buf = ""
+    _MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10 MB safety limit
+
+    def __init__(self, *, max_buffer_size: int = _MAX_BUFFER_SIZE) -> None:
+        self._parts: list[str] = []
         self._done = False
+        self._max_buffer_size = max_buffer_size
 
     @property
     def done(self) -> bool:
         return self._done
+
+    def _join_buf(self) -> str:
+        """Join accumulated parts into a single buffer string."""
+        if not self._parts:
+            return ""
+        if len(self._parts) == 1:
+            return self._parts[0]
+        buf = "".join(self._parts)
+        self._parts = [buf]
+        return buf
 
     def feed(self, raw: bytes | str) -> list[dict[str, Any]]:
         """Feed raw bytes/string, return list of parsed SSE data dicts."""
@@ -43,14 +59,18 @@ class SSEParser:
             chunk_text = raw.decode("utf-8", errors="replace")
         else:
             chunk_text = raw
-        self._buf += chunk_text
+        self._parts.append(chunk_text)
+        # Guard against unbounded memory growth from malformed upstream streams
+        if sum(len(p) for p in self._parts) > self._max_buffer_size:
+            raise ValueError("SSE parser buffer exceeded maximum size")
+        buf = self._join_buf()
         events: list[dict[str, Any]] = []
         while True:
-            if "\n\n" in self._buf:
-                event_text, self._buf = self._buf.split("\n\n", 1)
-            elif self._buf.startswith("data:") and self._buf.endswith("\n"):
-                event_text = self._buf.rstrip("\n")
-                self._buf = ""
+            if "\n\n" in buf:
+                event_text, buf = buf.split("\n\n", 1)
+            elif buf.startswith("data:") and buf.endswith("\n"):
+                event_text = buf.rstrip("\n")
+                buf = ""
             else:
                 break
             for line in event_text.split("\n"):
@@ -66,6 +86,7 @@ class SSEParser:
                     continue
             if self._done:
                 break
+        self._parts = [buf] if buf else []
         return events
 
 
@@ -82,5 +103,5 @@ def synthetic_stop_events(
                 "usage": extract_usage(upstream_usage),
             },
         ),
-        sse_event("message_stop", {"type": "message_stop"}),
+        _MESSAGE_STOP_EVENT,
     ]
