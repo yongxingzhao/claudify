@@ -21,22 +21,21 @@ def _completion_info(shell: str) -> str:
     snippets = {
         "bash": (
             f"# temporary (current session):\n"
-            f'eval "$({var}=complete_bash {prog})"\n\n'
+            f'eval "$({var}=source_bash {prog})"\n\n'
             f"# permanent (~/.bashrc):\n"
-            f'echo \'eval "$({var}=complete_bash {prog})"\' >> ~/.bashrc'
+            f'echo \'eval "$({var}=source_bash {prog})"\' >> ~/.bashrc'
         ),
         "zsh": (
             f"# temporary (current session):\n"
-            f'eval "$({var}=complete_zsh {prog})"\n\n'
+            f'eval "$({var}=source_zsh {prog})"\n\n'
             f"# permanent (~/.zshrc):\n"
-            f'echo \'eval "$({var}=complete_zsh {prog})"\' >> ~/.zshrc'
+            f'echo \'eval "$({var}=source_zsh {prog})"\' >> ~/.zshrc'
         ),
         "fish": (
-            f"# temporary (current session):\n"
-            f"{var}=complete_fish {prog} | source\n\n"
-            f"# permanent:\n"
-            f"mkdir -p ~/.config/fish/completions\n"
-            f"{var}=complete_fish {prog} > ~/.config/fish/completions/{prog}.fish"
+            f"# permanent (~/.config/fish/completions):\n"
+            f"{prog} --completion > ~/.config/fish/completions/{prog}.fish\n\n"
+            f"# or temporary:\n"
+            f"{var}=source_fish {prog} | source"
         ),
     }
     return snippets.get(shell, snippets["bash"])
