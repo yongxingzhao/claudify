@@ -38,6 +38,7 @@ class SSEParser:
         self._parts: list[str] = []
         self._done = False
         self._max_buffer_size = max_buffer_size
+        self._buf_len: int = 0  # incremental length tracking
 
     @property
     def done(self) -> bool:
@@ -59,9 +60,12 @@ class SSEParser:
             chunk_text = raw.decode("utf-8", errors="replace")
         else:
             chunk_text = raw
+        # Normalize CRLF to LF for cross-platform compatibility
+        chunk_text = chunk_text.replace("\r\n", "\n")
         self._parts.append(chunk_text)
+        self._buf_len += len(chunk_text)
         # Guard against unbounded memory growth from malformed upstream streams
-        if sum(len(p) for p in self._parts) > self._max_buffer_size:
+        if self._buf_len > self._max_buffer_size:
             raise ValueError("SSE parser buffer exceeded maximum size")
         buf = self._join_buf()
         events: list[dict[str, Any]] = []
@@ -87,6 +91,7 @@ class SSEParser:
             if self._done:
                 break
         self._parts = [buf] if buf else []
+        self._buf_len = len(buf)
         return events
 
 

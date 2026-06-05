@@ -134,14 +134,26 @@ def _setup_logging(settings: Settings) -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
 
     if settings.log_format == "json":
-        formatter = logging.Formatter(
-            '{"time":"%(asctime)s","level":"%(name)s","msg":"%(message)s"}'
-        )
         handler = logging.StreamHandler()
-        handler.setFormatter(formatter)
+        handler.setFormatter(_JsonFormatter())
         logging.basicConfig(level=level, handlers=[handler])
     else:
         logging.basicConfig(level=level)
+
+
+class _JsonFormatter(logging.Formatter):
+    """Emit one JSON object per log line with proper escaping."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        import json as _json
+
+        obj = {
+            "time": self.formatTime(record),
+            "level": record.name,
+            "severity": record.levelname,
+            "msg": record.getMessage(),
+        }
+        return _json.dumps(obj, ensure_ascii=False)
 
 
 def _print_startup_banner(settings: Settings) -> None:

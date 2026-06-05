@@ -106,20 +106,23 @@ async def _stream_response(
     t0: float, metrics: Metrics,
 ) -> AsyncIterator[bytes]:
     """Yield SSE chunks from an OpenAI streaming response, converting to Anthropic format."""
+    interrupted = False
     try:
         async for chunk in stream_openai_to_anthropic(
             r.aiter_bytes(), payload.get("model", ""),
         ):
             yield chunk
     except Exception:
+        interrupted = True
         log.warning("rid=%s stream interrupted", rid, exc_info=True)
         for ev in synthetic_stop_events("stop", None):
             yield ev
     finally:
         await r.aclose()
         stream_elapsed = time.monotonic() - t0
-        metrics.record_request("/v1/messages", stream_elapsed, r.status_code)
-        log.info("rid=%s stream completed in %.3fs status=%d", rid, stream_elapsed, r.status_code)
+        status = 502 if interrupted else r.status_code
+        metrics.record_request("/v1/messages", stream_elapsed, status)
+        log.info("rid=%s stream completed in %.3fs status=%d", rid, stream_elapsed, status)
 
 
 def _upstream_error_response(
@@ -130,13 +133,15 @@ def _upstream_error_response(
         elapsed = time.monotonic() - t0
         metrics.record_request("/v1/messages", elapsed, exc.response.status_code)
         log.warning("rid=%s upstream %d", rid, exc.response.status_code)
-        return passthrough_error(exc.response.status_code, exc.response.content)
+        # For streaming responses, content may not have been read from the wire yet
+        content = exc.response.content
+        return passthrough_error(exc.response.status_code, content)
     if isinstance(exc, httpx.TimeoutException):
         elapsed = time.monotonic() - t0
         metrics.record_request("/v1/messages", elapsed, 504)
         log.error("rid=%s upstream timeout: %s", rid, exc)
         return passthrough_error(504)
-    # ConnectError, ReadError, WriteError
+    # Other TransportError (ConnectError, ReadError, WriteError, RemoteProtocolError, etc.)
     elapsed = time.monotonic() - t0
     metrics.record_request("/v1/messages", elapsed, 502)
     log.error("rid=%s upstream unavailable: %s", rid, exc)
@@ -164,10 +169,15 @@ async def _handle_streaming(
             r = await client.send(req, stream=True)
         r.raise_for_status()
     except httpx.HTTPStatusError as exc:
+        # Read the streaming response body so passthrough_error has content
+        try:
+            await exc.response.aread()
+        except Exception:
+            pass
         resp = _upstream_error_response(exc, rid, t0, metrics)
         await exc.response.aclose()
         return _add_request_id(resp, request)
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
+    except httpx.TransportError as exc:
         return _add_request_id(_upstream_error_response(exc, rid, t0, metrics), request)
 
     resp = StreamingResponse(
@@ -184,6 +194,7 @@ async def _handle_nonstreaming(
 ) -> Response:
     """Handle a non-streaming messages request."""
     req = client.build_request("POST", "/chat/completions", json=openai_payload, headers=headers)
+    r: httpx.Response | None = None
     try:
         if settings.retry_attempts >= 1:
             r = await post_with_retry(
@@ -193,9 +204,16 @@ async def _handle_nonstreaming(
             r = await client.send(req)
         r.raise_for_status()
         data = r.json()
-    except (httpx.HTTPStatusError, httpx.TimeoutException,
-            httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
+    except (httpx.HTTPStatusError, httpx.TransportError) as exc:
         return _add_request_id(_upstream_error_response(exc, rid, t0, metrics), request)
+    except json.JSONDecodeError:
+        elapsed = time.monotonic() - t0
+        metrics.record_request("/v1/messages", elapsed, 502)
+        log.error("rid=%s upstream returned invalid JSON", rid)
+        return _add_request_id(passthrough_error(502), request)
+    finally:
+        if r is not None:
+            await r.aclose()
 
     elapsed = time.monotonic() - t0
     metrics.record_request("/v1/messages", elapsed, r.status_code)
@@ -251,7 +269,7 @@ async def health(client: httpx.AsyncClient, settings: Settings) -> dict[str, Any
                 settings.upstream_health_path,
                 timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0),
             )
-            result["upstream"] = "ok" if r.status_code < 400 else "degraded"
+            result["upstream"] = "ok" if r.status_code < 400 else ("misconfigured" if r.status_code == 404 else "degraded")
         except (httpx.TimeoutException, httpx.ConnectError):
             result["upstream"] = "unreachable"
     return result
@@ -277,6 +295,11 @@ async def count_tokens(request: Request, settings: Settings) -> Response:
         body = None
     if not isinstance(payload, dict):
         return make_error_response("invalid_request_error", "Request must be a JSON object", 400)
+    if "model" not in payload:
+        return make_error_response("invalid_request_error", "Missing required field: model", 400)
+    model = payload.get("model")
+    if not isinstance(model, str) or not model:
+        return make_error_response("invalid_request_error", "model must be a non-empty string", 400)
     msgs = payload.get("messages", [])
     if not isinstance(msgs, list) or not msgs:
         return make_error_response("invalid_request_error", "messages must be a non-empty array", 400)

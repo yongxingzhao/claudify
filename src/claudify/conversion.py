@@ -153,6 +153,16 @@ def extract_text_from_blocks(content: Any) -> str:
         btype = block.get("type")
         if btype == "text":
             parts.append(block.get("text", ""))
+        elif btype == "tool_use":
+            # Include tool name and input for token estimation
+            name = block.get("name", "")
+            inp = block.get("input")
+            if name:
+                parts.append(name)
+            if isinstance(inp, (dict, list)):
+                parts.append(json.dumps(inp, ensure_ascii=False))
+            elif isinstance(inp, str):
+                parts.append(inp)
         elif btype == "tool_result":
             tc = block.get("content")
             if isinstance(tc, str):
@@ -382,7 +392,6 @@ def _handle_tool_call(
             "block_index": next_index,
             "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
             "name": fn.get("name", ""),
-            "args_pieces": [],
         }
         tool_state[up_idx] = state
         next_index += 1
@@ -402,7 +411,6 @@ def _handle_tool_call(
     fn = tc.get("function") or {}
     args_piece = fn.get("arguments", "")
     if args_piece:
-        state["args_pieces"].append(args_piece)
         events.append(sse_event(
             "content_block_delta",
             {

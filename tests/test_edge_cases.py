@@ -369,7 +369,7 @@ async def test_health_upstream_degraded(make_client):
 @pytest.mark.anyio
 async def test_count_tokens_no_messages_key(make_client):
     client, _ = make_client(lambda r: httpx.Response(200, json={}))
-    r = await client.post("/v1/messages/count_tokens", json={})
+    r = await client.post("/v1/messages/count_tokens", json={"model": "claude-opus-4-7"})
     assert r.status_code == 400
     assert "messages" in r.json()["error"]["message"]
     await client.aclose()
@@ -380,7 +380,7 @@ async def test_count_tokens_messages_not_list(make_client):
     client, _ = make_client(lambda r: httpx.Response(200, json={}))
     r = await client.post(
         "/v1/messages/count_tokens",
-        json={"messages": "not a list"},
+        json={"model": "claude-opus-4-7", "messages": "not a list"},
     )
     assert r.status_code == 400
     await client.aclose()
@@ -392,6 +392,7 @@ async def test_count_tokens_system_list(make_client):
     r = await client.post(
         "/v1/messages/count_tokens",
         json={
+            "model": "claude-opus-4-7",
             "system": [{"type": "text", "text": "sys prompt"}],
             "messages": [{"role": "user", "content": "hi"}],
         },

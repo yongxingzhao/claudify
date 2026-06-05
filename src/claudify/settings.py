@@ -90,4 +90,8 @@ class Settings(BaseSettings):
         for key in toml_data:
             if key not in _VALID_FIELDS:
                 log.warning("unknown config key in %s: %r", path, key)
-        return cls(**toml_data)
+        try:
+            return cls(**toml_data)
+        except Exception as exc:
+            log.error("invalid configuration in %s: %s", path, exc)
+            raise SystemExit(1) from exc

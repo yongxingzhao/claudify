@@ -220,6 +220,7 @@ async def test_list_models_default_only(make_client):
 async def test_count_tokens(make_client):
     client, _ = make_client(lambda r: httpx.Response(200, json={}))
     r = await client.post("/v1/messages/count_tokens", json={
+        "model": "claude-opus-4-7",
         "messages": [{"role": "user", "content": "hello world"}],
     })
     assert r.status_code == 200
@@ -239,6 +240,7 @@ async def test_count_tokens_invalid_json(make_client):
 async def test_count_tokens_empty_messages(make_client):
     client, _ = make_client(lambda r: httpx.Response(200, json={}))
     r = await client.post("/v1/messages/count_tokens", json={
+        "model": "claude-opus-4-7",
         "messages": [],
     })
     assert r.status_code == 400
@@ -466,6 +468,7 @@ async def test_count_tokens_non_dict_payload(make_client):
 async def test_count_tokens_with_system_prompt(make_client):
     client, _ = make_client(lambda r: httpx.Response(200, json={}))
     r = await client.post("/v1/messages/count_tokens", json={
+        "model": "claude-opus-4-7",
         "system": "You are a helpful assistant.",
         "messages": [{"role": "user", "content": "hello world"}],
     })
@@ -473,6 +476,7 @@ async def test_count_tokens_with_system_prompt(make_client):
     tokens_with_system = r.json()["input_tokens"]
 
     r2 = await client.post("/v1/messages/count_tokens", json={
+        "model": "claude-opus-4-7",
         "messages": [{"role": "user", "content": "hello world"}],
     })
     tokens_without_system = r2.json()["input_tokens"]
@@ -635,11 +639,13 @@ async def test_count_tokens_inbound_auth(make_client):
     """count_tokens endpoint should require inbound auth when configured."""
     client, _ = make_client(lambda r: httpx.Response(200, json={}), inbound_api_key="secret")
     r = await client.post("/v1/messages/count_tokens", json={
+        "model": "claude-opus-4-7",
         "messages": [{"role": "user", "content": "hello"}],
     })
     assert r.status_code == 401
     # Now with valid key
     r2 = await client.post("/v1/messages/count_tokens", json={
+        "model": "claude-opus-4-7",
         "messages": [{"role": "user", "content": "hello"}],
     }, headers={"x-api-key": "secret"})
     assert r2.status_code == 200
@@ -651,6 +657,7 @@ async def test_count_tokens_response_format(make_client):
     """count_tokens should return id and type fields per Anthropic spec."""
     client, _ = make_client(lambda r: httpx.Response(200, json={}))
     r = await client.post("/v1/messages/count_tokens", json={
+        "model": "claude-opus-4-7",
         "messages": [{"role": "user", "content": "hello"}],
     })
     assert r.status_code == 200
@@ -677,4 +684,57 @@ async def test_empty_content_in_response(make_client):
     assert r.status_code == 200
     data = r.json()
     assert len(data["content"]) > 0  # Anthropic requires non-empty content
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_count_tokens_missing_model(make_client):
+    """count_tokens should require model field."""
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    r = await client.post("/v1/messages/count_tokens", json={
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+    assert r.status_code == 400
+    assert "model" in r.json()["error"]["message"]
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_health_unreachable_upstream(make_client):
+    """Health endpoint should report unreachable when upstream is down."""
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+    client, _ = make_client(handler, upstream_health_path="/health")
+    r = await client.get("/health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["upstream"] == "unreachable"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_remote_protocol_error(make_client):
+    """RemoteProtocolError should return 502, not 500."""
+    def handler(request):
+        raise httpx.RemoteProtocolError("connection lost")
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 502
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_upstream_invalid_json(make_client):
+    """200 response with invalid JSON should return 502."""
+    def handler(request):
+        return httpx.Response(200, text="not json", headers={"content-type": "application/json"})
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 502
     await client.aclose()

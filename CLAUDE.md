@@ -37,10 +37,15 @@ Pitfalls
 - Response model name always returns the original client-requested name (not the upstream model).
 - When inbound_api_key is set, the inbound key is for proxy auth only — never forwarded upstream.
 - inbound_api_key comparison MUST use hmac.compare_digest (timing attack prevention).
+- Catch httpx.TransportError (base class) for all transport failures — not individual subclasses.
+- Non-streaming responses must be explicitly closed with `await r.aclose()` to return connections to the pool.
+- Streaming retry failures: must `await exc.response.aread()` before accessing `.content` for error body.
 - Streaming requests use httpx_timeout(streaming=True) via build_request(timeout=...), which sets read=None.
 - retry_attempts semantics: value = number of retries AFTER the initial attempt. Internally, attempts+1 is passed to retry functions.
 - 429 responses are retried alongside 5xx; the Retry-After header is respected.
 - Backoff is capped at MAX_BACKOFF=30s to avoid excessively long waits.
 - OpenAI's tool_choice "none" maps from Anthropic's {"type": "none"}.
 - assistant messages with tool_calls should have content=None (not empty string).
+- Anthropic requires content array to be non-empty — fallback to [{"type": "text", "text": ""}].
 - top_k is passed through but most OpenAI backends ignore it — a warning is logged.
+- SSE parser normalizes CRLF → LF; buffer length tracked incrementally.
