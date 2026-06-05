@@ -14,7 +14,67 @@ import uvicorn
 
 from claudify.settings import Settings, default_config_path
 
-app = typer.Typer(help="Claudify: Anthropic-to-OpenAI translation proxy", no_args_is_help=True)
+
+def _completion_info(shell: str) -> str:
+    prog = "claudify"
+    var = f"_{prog.upper()}_COMPLETE"
+    snippets = {
+        "bash": (
+            f"# temporary (current session):\n"
+            f'eval "$({var}=source {prog})"\n\n'
+            f"# permanent (~/.bashrc):\n"
+            f'echo \'eval "$({var}=source {prog})"\' >> ~/.bashrc'
+        ),
+        "zsh": (
+            f"# temporary (current session):\n"
+            f'eval "$({var}=source {prog})"\n\n'
+            f"# permanent (~/.zshrc):\n"
+            f'echo \'eval "$({var}=source {prog})"\' >> ~/.zshrc'
+        ),
+        "fish": (
+            f"# temporary (current session):\n"
+            f"{prog} --completion {shell} | source\n\n"
+            f"# permanent:\n"
+            f"mkdir -p ~/.config/fish/completions\n"
+            f"{prog} --completion {shell} > ~/.config/fish/completions/{prog}.fish"
+        ),
+    }
+    return snippets.get(shell, snippets["bash"])
+
+
+def _detect_shell() -> str:
+    shell_env = os.environ.get("SHELL", "")
+    for name in ("bash", "zsh", "fish"):
+        if f"/{name}" in shell_env:
+            return name
+    return "bash"
+
+
+def _completion_callback(value: str) -> None:
+    if not value:
+        return
+    shell = value if value in ("bash", "zsh", "fish") else _detect_shell()
+    typer.echo(f"# Shell completion for {shell}\n")
+    typer.echo(_completion_info(shell))
+    raise typer.Exit(0)
+
+
+app = typer.Typer(
+    help="Claudify: Anthropic-to-OpenAI translation proxy",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+@app.callback(invoke_without_command=True)
+def _main(
+    completion: str = typer.Option(
+        "", "--completion",
+        help="Show shell completion (bash/zsh/fish, auto-detected if omitted)",
+    ),
+) -> None:
+    if completion is not None:
+        _completion_callback(completion)
 
 
 # ---------------------------------------------------------------------------
