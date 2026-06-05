@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `ConcurrencyLimitMiddleware`: rejects requests with 503 when concurrency exceeds `pool_limit`
 - Health endpoint now includes `version` field
 - `x-request-id` header now included on all endpoint responses (health, models, count_tokens)
+- `--completion` CLI flag: show shell completion instructions (auto-detects from `$SHELL`)
 
 ### Changed
 - `inbound_api_key` comparison uses `hmac.compare_digest` to prevent timing attacks
@@ -62,6 +63,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - JSON log formatter now uses `json.dumps()` for proper escaping, includes `exc_info` and `stack_info`
 - `count_tokens` now counts `tool_use` blocks in token estimation
 - protocol-mapping.md updated: model field always returns client-requested name
+- Error secret redaction: 4 regex patterns combined into a single alternation (faster, also matches uppercase variants)
+- `has_user` guard tracked as boolean during message loop (eliminates redundant post-loop scan)
+- `_build_finalization_events` converted to generator (avoids intermediate list allocation)
+- `_close_open_blocks` extracted to DRY streaming cleanup between normal and error paths
+- `_handle_tool_call` extracts `fn` dict once instead of calling `tc.get("function")` twice
+- `_json_response` and `_parse_body` helpers extracted in routes.py (DRY JSON encoding and body validation)
+- SSE parser `_parts` list reused via in-place mutation instead of per-feed allocation
+- `passthrough_error` skips JSON extraction on upstream bodies larger than 8KB
+- systemd `uninstall` no longer creates parent directories (path computation separated from `install`)
 
 ### Fixed
 - `tool_choice: {"type": "none"}` now correctly maps to OpenAI `"none"`
@@ -73,6 +83,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Non-streaming 200 with invalid JSON from upstream now returns 502 (was unhandled 500)
 - JSON log format now properly escapes special characters using `json.dumps()`
 - README examples referenced non-existent CLI flags (`init-config --backend`, `install-service --api-key`)
+- `--completion` CLI flag works as bare flag (`claudify --completion` auto-detects from `$SHELL`)
+- Retry now catches `httpx.TransportError` (ConnectError, ReadError, WriteError) during streaming
 
 ### Removed
 - Dead code: `_MAX_LATENCY` constant in metrics.py
