@@ -107,6 +107,9 @@ default_model = "hermes-agent"
 | `inbound_api_key` | `CLAUDIFY_INBOUND_API_KEY` | _(空)_ | 设置后要求入站请求携带匹配的 `x-api-key` 头 |
 | `host` | `CLAUDIFY_HOST` | `127.0.0.1` | 监听地址 |
 | `port` | `CLAUDIFY_PORT` | `4000` | 监听端口 |
+| `log_level` | `CLAUDIFY_LOG_LEVEL` | `INFO` | 日志级别：DEBUG, INFO, WARNING, ERROR |
+| `log_format` | `CLAUDIFY_LOG_FORMAT` | `text` | `text`（默认）或 `json`（结构化日志） |
+| `pool_limit` | `CLAUDIFY_POOL_LIMIT` | `100` | httpx 连接池最大连接数 |
 | `connect_timeout` | `CLAUDIFY_CONNECT_TIMEOUT` | _(同 request_timeout)_ | 连接超时（秒） |
 | `read_timeout` | `CLAUDIFY_READ_TIMEOUT` | _(同 request_timeout)_ | 非流式读取超时（秒），流式时自动设为 None |
 | `write_timeout` | `CLAUDIFY_WRITE_TIMEOUT` | _(同 request_timeout)_ | 写入超时（秒） |
@@ -174,7 +177,7 @@ src/claudify/
 ## 开发
 
 ```bash
-uv pip install -e ".[dev]"
+uv sync --group dev
 uv run pytest
 uv run ruff check src tests
 ```

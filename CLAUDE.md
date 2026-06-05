@@ -20,7 +20,7 @@ python -m claudify
 Architecture
 
 - src/claudify/settings.py — Settings (pydantic-settings); env CLAUDIFY_* + ~/.config/claudify/config.toml.
-- src/claudify/conversion.py — pure functions: anthropic_to_openai(), openai_to_anthropic_response(), stream_openai_to_anthropic(). The "no user message" guard and reverse model mapping live here.
+- src/claudify/conversion.py — pure functions: anthropic_to_openai(), openai_to_anthropic_response(), stream_openai_to_anthropic(). The "no user message" guard lives here.
 - src/claudify/routes.py — FastAPI route handlers: /v1/messages, /v1/models, /health, /metrics, /v1/messages/count_tokens. Inbound auth check, request validation, streaming timeout handling.
 - src/claudify/app.py — create_app(settings) factory; ASGI middleware (RequestIdMiddleware), CORS, global exception handler.
 - src/claudify/retry.py — post_with_retry(), stream_with_retry() with exponential backoff (capped at 30s). Retries 5xx AND 429. Respects Retry-After header on 429.
@@ -34,6 +34,8 @@ Pitfalls
 
 - ~/.config/claudify/config.toml is gitignored and chmod 0600 — never commit.
 - Unknown model names fall through model_map → default_model → original.
+- Response model name always returns the original client-requested name (not the upstream model).
+- When inbound_api_key is set, the inbound key is for proxy auth only — never forwarded upstream.
 - inbound_api_key comparison MUST use hmac.compare_digest (timing attack prevention).
 - Streaming requests use httpx_timeout(streaming=True) via build_request(timeout=...), which sets read=None.
 - retry_attempts semantics: value = number of retries AFTER the initial attempt. Internally, attempts+1 is passed to retry functions.

@@ -8,20 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 - `inbound_api_key` setting: require API key on inbound `x-api-key` header
-- `log_format` setting placeholder in `init-config` template
+- `log_format` setting: `"text"` (default) or `"json"` for structured logging
+- `log_format` placeholder in `init-config` template
 - Streaming requests now use `httpx_timeout(streaming=True)` (read=None) to avoid timeout on long streams
 - `429` (rate limit) responses are now retried alongside `5xx` errors
 - Respect `Retry-After` header on 429 responses during retry
 - Backoff cap at 30 seconds to avoid excessively long waits
 - `created_at` timestamp in both streaming and non-streaming responses
-- Reverse model mapping in responses (including streaming)
-- Request duration logged on successful requests
+- Request duration logged on successful requests (both streaming and non-streaming)
 - `--verbose`/`--quiet` CLI flags now correctly take effect (Settings passed via closure)
+- Streaming requests now record metrics on completion
+- `count_tokens` endpoint now requires `inbound_api_key` auth when configured
+- `count_tokens` response now includes `id` and `type` fields per Anthropic spec
+- Warning logged when messages with unsupported roles are dropped
 
 ### Changed
 - `inbound_api_key` comparison uses `hmac.compare_digest` to prevent timing attacks
+- When `inbound_api_key` is set, the inbound key is no longer forwarded upstream — `api_key` is used instead
 - CORS `allow_methods` and `allow_headers` restricted to specific values
 - `install-service` uses `shutil.which("claudify")` to find binary path
+- `install-service` removed dead `--host`/`--port` options (service reads from config.toml)
 - `retry_attempts` semantics: `>=1` triggers retry, `attempts+1` passed to retry functions
 - Assistant messages with `tool_calls` now set `content: null` (was empty string)
 - `top_k` passthrough now logs a warning
@@ -31,15 +37,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `count_tokens` validates payload is a dict (no crash on non-dict input)
 - Unhandled error responses include request ID
 - `init-config` template expanded with missing settings
+- Health endpoint now uses dedicated short timeout (5s read) and catches specific httpx exceptions
+- Model name in response always returns the client-requested name (consistent between streaming and non-streaming)
+- README config table now includes `log_level`, `log_format`, and `pool_limit`
+- README dev install command changed from `uv pip install -e ".[dev]"` to `uv sync --group dev`
 
 ### Fixed
 - `tool_choice: {"type": "none"}` now correctly maps to OpenAI `"none"`
 - Streaming response leak on 5xx after retries exhausted
+- Empty `content` array in response now falls back to `[{"type": "text", "text": ""}]` (Anthropic spec requires non-empty)
+- Streaming exception handler now emits `content_block_stop` for open tool blocks
+- `tool_call_id` fallback from empty string to generated ID (OpenAI rejects empty `tool_call_id`)
 - README examples referenced non-existent CLI flags (`init-config --backend`, `install-service --api-key`)
-- Protocol mapping doc claimed reverse model mapping existed but was not implemented
 
 ### Removed
 - Dead code: `_MAX_LATENCY` constant in metrics.py
+- Dead code: `_reverse_map_model` function (model name now always uses original)
+- Dead code: `args_pieces` mutation in streaming exception handler
 
 ## [0.1.0] - 2025-05-19
 
