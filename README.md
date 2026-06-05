@@ -153,7 +153,7 @@ src/claudify/
 ## Development
 
 ```bash
-uv pip install -e ".[dev]"
+uv sync --group dev
 uv run pytest
 uv run ruff check src tests
 ```

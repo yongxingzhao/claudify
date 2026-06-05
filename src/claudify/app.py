@@ -44,7 +44,7 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
         timeout=settings.httpx_timeout(),
         limits=httpx.Limits(
             max_connections=settings.pool_limit,
-            max_keepalive_connections=20,
+            max_keepalive_connections=min(20, settings.pool_limit),
         ),
     )
 
@@ -102,6 +102,6 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
 
     @app.post("/v1/messages/count_tokens")
     async def _count_tokens(request: Request) -> Response:
-        return await count_tokens(request)
+        return await count_tokens(request, settings=app.state.settings)
 
     return app

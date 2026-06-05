@@ -48,17 +48,22 @@ def passthrough_error(status: int, upstream_body: bytes | None = None) -> Respon
     error_type = _error_type_for_status(status)
     message = f"upstream returned {status}"
     if upstream_body:
-        raw = upstream_body[:200]
+        # Try to decode the full body first; fall back to truncated for safety
         try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                err = parsed.get("error") or {}
-                if isinstance(err, dict):
-                    msg = err.get("message") or err.get("msg") or ""
-                    if msg:
-                        message = _sanitize_error_message(str(msg))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
+            decoded = upstream_body.decode("utf-8", errors="replace")
+        except Exception:
+            decoded = ""
+        if decoded:
+            try:
+                parsed = json.loads(decoded)
+                if isinstance(parsed, dict):
+                    err = parsed.get("error") or {}
+                    if isinstance(err, dict):
+                        msg = err.get("message") or err.get("msg") or ""
+                        if msg:
+                            message = _sanitize_error_message(str(msg))
+            except (json.JSONDecodeError, ValueError):
+                pass
     return JSONResponse(
         status_code=status,
         content={"type": "error", "error": {"type": error_type, "message": message}},

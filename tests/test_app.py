@@ -605,3 +605,76 @@ async def test_bearer_token_sanitization(make_client):
     assert "sk-supersecret123" not in msg
     assert "[REDACTED]" in msg
     await client.aclose()
+
+
+# ---------- Round 3: additional tests -------------------------------------
+
+
+@pytest.mark.anyio
+async def test_inbound_key_not_forwarded_upstream(make_client, chat_response):
+    """When inbound_api_key is set, the inbound x-api-key should NOT be forwarded upstream."""
+    captured = {}
+
+    def handler(request):
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json=chat_response(body="hi"))
+
+    client, _ = make_client(handler, inbound_api_key="my-inbound-key", api_key="upstream-key")
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    }, headers={"x-api-key": "my-inbound-key"})
+    assert r.status_code == 200
+    # Upstream should get the configured api_key, NOT the inbound key
+    assert captured["auth"] == "Bearer upstream-key"
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_count_tokens_inbound_auth(make_client):
+    """count_tokens endpoint should require inbound auth when configured."""
+    client, _ = make_client(lambda r: httpx.Response(200, json={}), inbound_api_key="secret")
+    r = await client.post("/v1/messages/count_tokens", json={
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+    assert r.status_code == 401
+    # Now with valid key
+    r2 = await client.post("/v1/messages/count_tokens", json={
+        "messages": [{"role": "user", "content": "hello"}],
+    }, headers={"x-api-key": "secret"})
+    assert r2.status_code == 200
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_count_tokens_response_format(make_client):
+    """count_tokens should return id and type fields per Anthropic spec."""
+    client, _ = make_client(lambda r: httpx.Response(200, json={}))
+    r = await client.post("/v1/messages/count_tokens", json={
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert "id" in data
+    assert data["type"] == "token_count"
+    assert "input_tokens" in data
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_empty_content_in_response(make_client):
+    """When upstream returns empty content, response should still have a content array."""
+    def handler(request):
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 0},
+        })
+    client, _ = make_client(handler)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data["content"]) > 0  # Anthropic requires non-empty content
+    await client.aclose()

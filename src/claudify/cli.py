@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import platform
@@ -41,7 +42,8 @@ def init_config() -> None:
         '# inbound_api_key = ""  # Require this key in inbound x-api-key header\n'
         'host = "127.0.0.1"\n'
         'port = 4000\n'
-        'log_level = "INFO"\n\n'
+        'log_level = "INFO"\n'
+        '# log_format = "text"  # "text" or "json" for structured logging\n\n'
         '# Timeout settings (seconds)\n'
         '# request_timeout = 300.0\n'
         '# connect_timeout = 10.0\n'
@@ -73,19 +75,15 @@ def init_config() -> None:
 @app.command("install-service")
 def install_service(
     backend: str = typer.Option("", help="Override backend_base from config"),
-    host: str = typer.Option("", help="Override host from config"),
-    port: int = typer.Option(0, help="Override port from config"),
 ) -> None:
     s = Settings.load()
     be = backend or s.backend_base
-    h = host or s.host
-    p = port or s.port
 
     cfg = default_config_path()
     cfg.parent.mkdir(parents=True, exist_ok=True)
     if not cfg.exists():
         cfg.write_text(
-            f'backend_base = "{be}"\nhost = "{h}"\nport = {p}\n',
+            f'backend_base = "{be}"\n',
             encoding="utf-8",
         )
         os.chmod(cfg, 0o600)
@@ -94,12 +92,12 @@ def install_service(
     if platform.system() == "Darwin":
         from claudify.service.launchd import install as ld_install
         from claudify.service.launchd import load_agent
-        ld_install(h, p, be)
+        ld_install(s.host, s.port, be)
         load_agent()
         typer.echo("LaunchAgent installed and loaded.")
     else:
         from claudify.service.systemd import install as sd_install
-        sd_install(h, p, be)
+        sd_install(s.host, s.port, be)
         typer.echo("systemd unit installed. Run: systemctl --user enable --now claudify")
 
 
@@ -131,7 +129,16 @@ def run(
     elif quiet:
         s.log_level = "WARNING"
 
-    logging.basicConfig(level=getattr(logging, s.log_level.upper(), logging.INFO))
+    # Configure logging format
+    if s.log_format == "json":
+        formatter = logging.Formatter(
+            '{"time":"%(asctime)s","level":"%(name)s","msg":"%(message)s"}'
+        )
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        logging.basicConfig(level=getattr(logging, s.log_level.upper(), logging.INFO), handlers=[handler])
+    else:
+        logging.basicConfig(level=getattr(logging, s.log_level.upper(), logging.INFO))
 
     if s.model_map:
         typer.echo(f"Model map: {s.model_map}")
@@ -146,7 +153,7 @@ def run(
     # Pass the already-loaded Settings to create_app via closure,
     # so --verbose/--quiet flags and config overrides take effect.
     from claudify.app import create_app
-    app_factory = lambda s=s: create_app(s)  # noqa: E731
+    app_factory = functools.partial(create_app, s)
 
     uvicorn.run(
         app_factory,

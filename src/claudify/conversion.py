@@ -94,7 +94,7 @@ def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
             tool_msgs.append(
                 {
                     "role": "tool",
-                    "tool_call_id": clean_block.get("tool_use_id") or "",
+                    "tool_call_id": clean_block.get("tool_use_id") or f"call_{uuid.uuid4().hex[:24]}",
                     "content": tool_text,
                 }
             )
@@ -134,14 +134,6 @@ def _assistant_content_to_openai(content: Any) -> tuple[str, list[dict[str, Any]
         elif btype == "thinking":
             log.debug("dropping thinking block (%d chars)", len(block.get("thinking", "")))
     return "\n".join(p for p in text_parts if p), tool_calls
-
-
-def _reverse_map_model(model: str, model_map: dict[str, str]) -> str:
-    """Try to reverse-map an OpenAI model name back to the Anthropic name."""
-    for anthropic_name, openai_name in model_map.items():
-        if openai_name == model:
-            return anthropic_name
-    return model
 
 
 def extract_text_from_blocks(content: Any) -> str:
@@ -226,13 +218,16 @@ def anthropic_to_openai(
                 out_messages.append({"role": "user", "content": user_content})
         elif role == "assistant":
             text, tool_calls = _assistant_content_to_openai(content)
+            entry: dict[str, Any] = {"role": "assistant"}
             if tool_calls:
-                entry: dict[str, Any] = {"role": "assistant", "content": text or None, "tool_calls": tool_calls}
+                # OpenAI requires content=None (not empty string) when tool_calls present
+                entry["content"] = text or None
+                entry["tool_calls"] = tool_calls
             else:
-                entry = {"role": "assistant", "content": text or None}
-                if entry["content"] is None:
-                    entry["content"] = ""
+                entry["content"] = text or ""
             out_messages.append(entry)
+        else:
+            log.warning("dropping message with unsupported role: %r", role)
 
     has_user = any(m["role"] == "user" for m in out_messages)
     if not has_user:
@@ -307,6 +302,9 @@ def openai_to_anthropic_response(
                 "input": _parse_tool_arguments(fn.get("arguments", "")),
             }
         )
+    # Anthropic API requires content to be a non-empty array
+    if not content:
+        content.append({"type": "text", "text": ""})
 
     result: dict[str, Any] = {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
@@ -322,11 +320,6 @@ def openai_to_anthropic_response(
         },
     }
 
-    # Reverse-map the upstream model if it differs from the original request
-    upstream_model = openai_resp.get("model", "")
-    if upstream_model and upstream_model != original_model and model_map:
-        result["model"] = _reverse_map_model(upstream_model, model_map)
-
     result["created_at"] = int(time.time())
 
     user = openai_resp.get("user")
@@ -339,14 +332,11 @@ def openai_to_anthropic_response(
 async def stream_openai_to_anthropic(
     openai_stream: AsyncIterator[bytes],
     original_model: str,
-    model_map: dict[str, str] | None = None,
 ) -> AsyncIterator[bytes]:
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
 
-    # Reverse-map model for streaming response (consistent with non-streaming)
+    # Always return the original model name to the client (consistent with non-streaming path)
     display_model = original_model
-    if model_map:
-        display_model = _reverse_map_model(original_model, model_map) or original_model
 
     yield sse_event(
         "message_start",
@@ -479,7 +469,10 @@ async def stream_openai_to_anthropic(
                 {"type": "content_block_stop", "index": text_block_index},
             )
         for state in tool_state.values():
-            state["args"] = "".join(state.pop("args_pieces"))
+            yield sse_event(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": state["block_index"]},
+            )
         for _ev in synthetic_stop_events(finish_reason, upstream_usage):
             yield _ev
         return

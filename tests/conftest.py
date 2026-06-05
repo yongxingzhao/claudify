@@ -24,10 +24,11 @@ def make_client():
         cors_origins: list[str] | None = None,
         upstream_health_path: str = "",
         inbound_api_key: str = "",
+        api_key: str = "test-key",
     ) -> tuple[httpx.AsyncClient, Settings]:
         s = Settings(
             backend_base="http://test-backend/v1",
-            api_key="test-key",
+            api_key=api_key,
             inbound_api_key=inbound_api_key,
             model_map=model_map if model_map is not None else {"claude-opus-4-7": "hermes-agent"},
             default_model=default_model,

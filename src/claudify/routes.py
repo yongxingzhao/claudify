@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -25,15 +26,21 @@ log = logging.getLogger("claudify")
 
 def _build_headers(request: Request, settings: Settings) -> dict[str, str]:
     hdrs: dict[str, str] = {"Content-Type": "application/json"}
+    # When inbound_api_key is set, x-api-key is for proxy auth only — never forward it upstream.
+    # Use the configured api_key for upstream authentication instead.
     api_key = settings.api_key
-    x_api_key = request.headers.get("x-api-key")
-    auth_header = request.headers.get("authorization")
-    if x_api_key:
-        hdrs["Authorization"] = f"Bearer {x_api_key}"
-    elif auth_header:
-        hdrs["Authorization"] = auth_header
-    elif api_key:
-        hdrs["Authorization"] = f"Bearer {api_key}"
+    if settings.inbound_api_key:
+        if api_key:
+            hdrs["Authorization"] = f"Bearer {api_key}"
+    else:
+        x_api_key = request.headers.get("x-api-key")
+        auth_header = request.headers.get("authorization")
+        if x_api_key:
+            hdrs["Authorization"] = f"Bearer {x_api_key}"
+        elif auth_header:
+            hdrs["Authorization"] = auth_header
+        elif api_key:
+            hdrs["Authorization"] = f"Bearer {api_key}"
     for h in ("anthropic-beta", "anthropic-version"):
         v = request.headers.get(h)
         if v:
@@ -127,7 +134,7 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
             async def _generate() -> AsyncIterator[bytes]:
                 try:
                     async for chunk in stream_openai_to_anthropic(
-                        r.aiter_bytes(), payload.get("model", ""), settings.model_map,
+                        r.aiter_bytes(), payload.get("model", ""),
                     ):
                         yield chunk
                 except Exception:
@@ -136,6 +143,9 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
                         yield ev
                 finally:
                     await r.aclose()
+                    stream_elapsed = time.monotonic() - t0
+                    metrics.record_request("/v1/messages", stream_elapsed, r.status_code)
+                    log.info("rid=%s stream completed in %.3fs status=%d", rid, stream_elapsed, r.status_code)
 
             resp = StreamingResponse(_generate(), media_type="text/event-stream")
             return _add_request_id(resp, request)
@@ -193,9 +203,12 @@ async def health(client: httpx.AsyncClient, settings: Settings) -> dict[str, Any
     result: dict[str, Any] = {"status": "ok"}
     if settings.upstream_health_path:
         try:
-            r = await client.get(settings.upstream_health_path)
+            r = await client.get(
+                settings.upstream_health_path,
+                timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0),
+            )
             result["upstream"] = "ok" if r.status_code < 400 else "degraded"
-        except Exception:
+        except (httpx.TimeoutException, httpx.ConnectError):
             result["upstream"] = "unreachable"
     return result
 
@@ -204,7 +217,13 @@ async def metrics_endpoint(metrics: Metrics) -> Response:
     return Response(content=metrics.render(), media_type="text/plain")
 
 
-async def count_tokens(request: Request) -> Response:
+async def count_tokens(request: Request, settings: Settings) -> Response:
+    # Optional inbound authentication (same as /v1/messages)
+    if settings.inbound_api_key:
+        key = request.headers.get("x-api-key") or ""
+        if not hmac.compare_digest(key, settings.inbound_api_key):
+            return make_error_response("authentication_error", "Invalid API key", 401)
+
     body = await request.body()
     try:
         payload = json.loads(body)
@@ -217,48 +236,36 @@ async def count_tokens(request: Request) -> Response:
     msgs = payload.get("messages", [])
     if not isinstance(msgs, list) or not msgs:
         return make_error_response("invalid_request_error", "messages must be a non-empty array", 400)
+
     total_chars = 0
     total_words = 0
-    # Count system prompt
+
+    def _count_text(text: str) -> None:
+        nonlocal total_chars, total_words
+        if text:
+            total_chars += len(text)
+            total_words += len(text.split())
+
+    # Count system prompt using shared extraction
     system = payload.get("system")
     if isinstance(system, str) and system:
-        total_chars += len(system)
-        total_words += len(system.split())
+        _count_text(system)
     elif isinstance(system, list):
-        for item in system:
-            if isinstance(item, dict) and item.get("type") == "text":
-                t = item.get("text", "")
-                total_chars += len(t)
-                total_words += len(t.split())
-    # Count messages
+        from claudify.conversion import _system_to_openai
+        _count_text(_system_to_openai(system))
+
+    # Count messages using shared extraction
+    from claudify.conversion import extract_text_from_blocks
     for m in msgs:
-        if not isinstance(m, dict):
-            continue
-        c = m.get("content", "")
-        if isinstance(c, str):
-            total_chars += len(c)
-            total_words += len(c.split())
-        elif isinstance(c, list):
-            for block in c:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type")
-                if btype == "text":
-                    t = block.get("text", "")
-                    if isinstance(t, str):
-                        total_chars += len(t)
-                        total_words += len(t.split())
-                elif btype == "tool_result":
-                    tc = block.get("content")
-                    if isinstance(tc, str):
-                        total_chars += len(tc)
-                        total_words += len(tc.split())
-                    elif isinstance(tc, list):
-                        for sub in tc:
-                            if isinstance(sub, dict) and sub.get("type") == "text":
-                                t = sub.get("text", "")
-                                if isinstance(t, str):
-                                    total_chars += len(t)
-                                    total_words += len(t.split())
+        if isinstance(m, dict):
+            _count_text(extract_text_from_blocks(m.get("content")))
+
     estimated = max(total_words, total_chars // 4)
-    return Response(content=json.dumps({"input_tokens": estimated}), media_type="application/json")
+    return Response(
+        content=json.dumps({
+            "id": f"ctkn_{uuid.uuid4().hex[:24]}",
+            "type": "token_count",
+            "input_tokens": estimated,
+        }),
+        media_type="application/json",
+    )

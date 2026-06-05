@@ -371,11 +371,11 @@ def test_synthetic_stop_events():
     assert payload["delta"]["stop_reason"] == "end_turn"
 
 
-# ---------- T1: reverse model mapping --------------------------------------
+# ---------- T1: model name consistency --------------------------------------
 
 
-def test_reverse_model_mapping_in_response():
-    """When upstream returns a different model name, it should be reverse-mapped."""
+def test_model_name_always_original():
+    """Response model should always be the original requested model, not the upstream one."""
     resp = {
         "id": "chatcmpl-1",
         "model": "gpt-4",
@@ -384,19 +384,19 @@ def test_reverse_model_mapping_in_response():
     }
     model_map = {"claude-opus-4-7": "gpt-4"}
     out = openai_to_anthropic_response(resp, "claude-opus-4-7", model_map)
-    # Upstream returned "gpt-4" which matches the map, should reverse-map
+    # Always returns original model name, not the upstream name
     assert out["model"] == "claude-opus-4-7"
 
 
-def test_reverse_model_mapping_no_match():
-    """When upstream model is not in the map, return it as-is."""
+def test_model_name_no_map():
+    """Without a model map, still returns original model name."""
     resp = {
         "model": "gpt-4o-mini",
         "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
         "usage": {},
     }
-    out = openai_to_anthropic_response(resp, "claude-opus-4-7", {"claude-opus-4-7": "gpt-4"})
-    assert out["model"] == "gpt-4o-mini"
+    out = openai_to_anthropic_response(resp, "claude-opus-4-7")
+    assert out["model"] == "claude-opus-4-7"
 
 
 def test_response_includes_created_at():
