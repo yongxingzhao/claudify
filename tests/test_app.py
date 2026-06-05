@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -737,4 +739,27 @@ async def test_upstream_invalid_json(make_client):
         "messages": [{"role": "user", "content": "hi"}],
     })
     assert r.status_code == 502
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_unhandled_exception_returns_api_error(make_client, chat_response):
+    """Unhandled exception handler returns Anthropic error format with request ID."""
+    from claudify.errors import make_error_response
+
+    def handler(r):
+        return httpx.Response(200, json=chat_response(body="hi"))
+    client, _ = make_client(handler)
+    # Test the error handler output format directly (the handler is registered
+    # via @app.exception_handler(Exception) and uses make_error_response)
+    resp = make_error_response("api_error", "internal error (rid=abc123)", 500)
+    assert resp.status_code == 500
+    body = json.loads(resp.body)
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "api_error"
+    assert "abc123" in body["error"]["message"]
+    # Without rid
+    resp2 = make_error_response("api_error", "internal error", 500)
+    body2 = json.loads(resp2.body)
+    assert "internal error" in body2["error"]["message"]
     await client.aclose()

@@ -1413,9 +1413,22 @@ async def test_stream_retry_429():
     await client.aclose()
 
 
-# ============================================================================
-# errors.py: edge cases
-# ============================================================================
+@pytest.mark.anyio
+async def test_stream_retry_all_exhausted_503():
+    """All stream retries with persistent 503 should return the error response."""
+    from claudify.retry import stream_with_retry
+
+    def handler(request):
+        return httpx.Response(503, json={"error": {"message": "overloaded"}})
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport, base_url="http://test/v1")
+    req = client.build_request("POST", "/chat/completions", json={"model": "m"})
+    r, retried = await stream_with_retry(client, req, attempts=3, backoff=0.01)
+    assert retried
+    assert r.status_code == 503
+    await r.aclose()
+    await client.aclose()
 
 
 def test_error_type_for_status_unknown():
@@ -1650,3 +1663,28 @@ async def test_stream_tool_call_only():
     all_text = b"".join(events).decode()
     assert "tool_use" in all_text
     assert '"tool_use"' in all_text
+
+
+@pytest.mark.anyio
+async def test_stream_mixed_text_and_tool():
+    """Stream with both text content and tool calls — text block must close before tool block opens."""
+
+    async def mixed_stream():
+        yield b'data: {"id":"c","choices":[{"delta":{"content":"Let me "},"index":0}],"model":"m"}\n\n'
+        yield b'data: {"id":"c","choices":[{"delta":{"content":"check."},"index":0}],"model":"m"}\n\n'
+        yield b'data: {"id":"c","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"search","arguments":""}}]},"index":0}],"model":"m"}\n\n'
+        yield b'data: {"id":"c","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"q\\":\\"test\\"}"}}]},"index":0}],"model":"m"}\n\n'
+        yield b'data: {"id":"c","choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"model":"m"}\n\n'
+        yield b'data: [DONE]\n\n'
+
+    events = []
+    async for chunk in stream_openai_to_anthropic(mixed_stream(), "test-model"):
+        events.append(chunk)
+
+    all_text = b"".join(events).decode()
+    # Text block stop must appear before tool_use block start
+    text_stop_pos = all_text.index('"content_block_stop"')
+    tool_start_pos = all_text.index('"tool_use"')
+    assert text_stop_pos < tool_start_pos
+    assert "Let me" in all_text
+    assert "check." in all_text

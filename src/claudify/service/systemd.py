@@ -7,12 +7,11 @@ from pathlib import Path
 
 
 def _unit_path() -> Path:
-    base = Path.home() / ".config" / "systemd" / "user"
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "claudify.service"
+    return Path.home() / ".config" / "systemd" / "user" / "claudify.service"
 
 
 def install(host: str, port: int, backend_base: str) -> None:
+    _unit_path().parent.mkdir(parents=True, exist_ok=True)
     env_lines = []
     if backend_base:
         env_lines.append(f"CLAUDIFY_BACKEND_BASE={backend_base}")

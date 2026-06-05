@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from claudify.sse import SSEParser
 
 
@@ -60,3 +62,10 @@ def test_sse_parser_incremental():
     parser.feed("data: {\"b\":2}\n\n")
     # Done flag should be false
     assert not parser.done
+
+
+def test_sse_parser_buffer_overflow():
+    """Exceeding max_buffer_size raises ValueError."""
+    parser = SSEParser(max_buffer_size=100)
+    with pytest.raises(ValueError, match="buffer exceeded"):
+        parser.feed("x" * 150)

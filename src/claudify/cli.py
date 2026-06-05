@@ -9,7 +9,9 @@ import os
 import platform
 import textwrap
 from pathlib import Path
+from typing import Any
 
+import click
 import typer
 import uvicorn
 
@@ -62,6 +64,13 @@ def _completion_callback(value: str | None) -> None:
     raise typer.Exit(0)
 
 
+def _completion_click_callback(ctx: Any, param: Any, value: bool) -> None:
+    """Click option callback — fires on --completion flag."""
+    if not value:
+        return
+    _completion_callback(None)
+
+
 app = typer.Typer(
     help="Claudify: Anthropic-to-OpenAI translation proxy",
     no_args_is_help=True,
@@ -79,6 +88,16 @@ def _patched_get_command(ti):
     cmd = _orig_get_command(ti)
     # Remove the auto-added --install-completion / --show-completion params
     cmd.params = [p for p in cmd.params if p.name not in ("install_completion", "show_completion")]
+    # Inject --completion as a click boolean flag with expose_value=False.
+    # Auto-detects shell from $SHELL. Override with SHELL=/bin/bash claudify --completion
+    cmd.params.append(click.Option(
+        ("--completion",),
+        is_flag=True,
+        is_eager=True,
+        help="Show shell completion instructions (auto-detects shell from $SHELL)",
+        callback=_completion_click_callback,
+        expose_value=False,
+    ))
     return cmd
 
 
@@ -86,14 +105,8 @@ typer.main.get_command = _patched_get_command
 
 
 @app.callback(invoke_without_command=True)
-def _main(
-    completion: bool = typer.Option(
-        False, "--completion",
-        help="Show shell completion instructions (auto-detects shell from $SHELL)",
-    ),
-) -> None:
-    if completion:
-        _completion_callback(None)
+def _main() -> None:
+    pass
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 from claudify.sse import (
@@ -379,6 +379,7 @@ def _handle_tool_call(
     text_block_open: bool, text_block_index: int, next_index: int,
 ) -> tuple[int, bool]:
     """Append tool call content_block_start/delta events. Return updated next_index and text_block_open."""
+    fn = tc.get("function") or {}
     up_idx = tc.get("index", 0)
     state = tool_state.get(up_idx)
     if state is None:
@@ -388,7 +389,6 @@ def _handle_tool_call(
                 {"type": "content_block_stop", "index": text_block_index},
             ))
             text_block_open = False
-        fn = tc.get("function") or {}
         state = {
             "block_index": next_index,
             "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
@@ -409,7 +409,6 @@ def _handle_tool_call(
                 },
             },
         ))
-    fn = tc.get("function") or {}
     args_piece = fn.get("arguments", "")
     if args_piece:
         events.append(sse_event(
@@ -446,20 +445,19 @@ def _build_finalization_events(
     text_block_open: bool, text_block_index: int,
     tool_state: dict[int, dict[str, Any]],
     finish_reason: str, upstream_usage: dict[str, Any] | None,
-) -> list[bytes]:
-    """Build the closing content_block_stop, message_delta, and message_stop events."""
-    events = _close_open_blocks(text_block_open, text_block_index, tool_state)
+) -> Iterator[bytes]:
+    """Yield closing content_block_stop, message_delta, and message_stop events."""
+    yield from _close_open_blocks(text_block_open, text_block_index, tool_state)
     stop_reason = STOP_REASON_MAP.get(finish_reason, "end_turn")
-    events.append(sse_event(
+    yield sse_event(
         "message_delta",
         {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
             "usage": extract_usage(upstream_usage),
         },
-    ))
-    events.append(_MESSAGE_STOP_EVENT)
-    return events
+    )
+    yield _MESSAGE_STOP_EVENT
 
 
 async def stream_openai_to_anthropic(

@@ -90,7 +90,9 @@ class SSEParser:
                     continue
             if self._done:
                 break
-        self._parts = [buf] if buf else []
+        self._parts.clear()
+        if buf:
+            self._parts.append(buf)
         self._buf_len = len(buf)
         return events
 

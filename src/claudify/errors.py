@@ -43,8 +43,8 @@ def make_error_response(error_type: str, message: str, status: int) -> JSONRespo
 def passthrough_error(status: int, upstream_body: bytes | None = None) -> Response:
     error_type = _error_type_for_status(status)
     message = f"upstream returned {status}"
-    if upstream_body:
-        # Try to decode the full body first; fall back to truncated for safety
+    # Only attempt JSON extraction on reasonably-sized error bodies (e.g. not full HTML pages)
+    if upstream_body and len(upstream_body) <= 8192:
         try:
             decoded = upstream_body.decode("utf-8", errors="replace")
         except Exception:
