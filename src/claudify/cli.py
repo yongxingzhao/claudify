@@ -69,6 +69,32 @@ app = typer.Typer(
 )
 
 
+# Install Typer's shell completion hook (disabled by add_completion=False).
+from typer.core import _typer_main_shell_completion  # noqa: E402
+
+app._add_completion = True  # enable the hook
+# Monkey-patch: Typer installs the hook during get_command/get_group,
+# but only when _add_completion is True. We set it True for the hook
+# then immediately hide the options by not adding them as params.
+# The hook lives on the Command subclass, installed lazily by Typer.
+# We need to ensure it's present. Easiest: set a flag on the Typer instance
+# then remove the extra params after command construction.
+# Actually simpler: just override the main Command's method.
+import typer.core as _tc  # noqa: E402
+
+_orig_get_command = typer.main.get_command
+
+
+def _patched_get_command(ti):
+    cmd = _orig_get_command(ti)
+    # Remove the auto-added --install-completion / --show-completion params
+    cmd.params = [p for p in cmd.params if p.name not in ("install_completion", "show_completion")]
+    return cmd
+
+
+typer.main.get_command = _patched_get_command
+
+
 @app.callback(invoke_without_command=True)
 def _main(
     completion: bool = typer.Option(
