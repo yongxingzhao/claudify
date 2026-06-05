@@ -26,7 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `ConcurrencyLimitMiddleware`: rejects requests with 503 when concurrency exceeds `pool_limit`
 - Health endpoint now includes `version` field
 - `x-request-id` header now included on all endpoint responses (health, models, count_tokens)
-- `--completion` CLI flag: show shell completion instructions (auto-detects from `$SHELL`)
+- `--completion` CLI flag: show shell completion instructions. Supports `claudify --completion` (auto-detect from `$SHELL`) and `claudify --completion bash|zsh|fish` (explicit shell)
 
 ### Changed
 - `inbound_api_key` comparison uses `hmac.compare_digest` to prevent timing attacks
@@ -83,7 +83,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Non-streaming 200 with invalid JSON from upstream now returns 502 (was unhandled 500)
 - JSON log format now properly escapes special characters using `json.dumps()`
 - README examples referenced non-existent CLI flags (`init-config --backend`, `install-service --api-key`)
-- `--completion` CLI flag works as bare flag (`claudify --completion` auto-detects from `$SHELL`)
+- `--completion` CLI flag works as bare flag (`claudify --completion` auto-detects from `$SHELL`) and accepts optional shell argument (`claudify --completion bash`)
 - Retry now catches `httpx.TransportError` (ConnectError, ReadError, WriteError) during streaming
 
 ### Removed
