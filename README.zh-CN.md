@@ -50,6 +50,88 @@ claudify run
 export ANTHROPIC_BASE_URL=http://127.0.0.1:4000
 ```
 
+## 架构
+
+```
+┌──────────────────────┐      ┌───────────────────────────────────────────────┐      ┌──────────────────────┐
+│   Anthropic Client   │      │              Claudify Proxy                   │      │   OpenAI Backend     │
+│                      │      │                                               │      │                      │
+│  - Claude Code       │─────▶│  FastAPI Server (routes.py, app.py)          │─────▶│  - vLLM              │
+│  - Python SDK        │  1   │  ┌───────────────────────────────────────┐   │  4   │  - OpenAI API        │
+│  - curl / HTTP       │◀─────│  │  Auth Check (inbound_api_key)         │   │◀─────│  - Any compatible    │
+│                      │  5   │  ├───────────────────────────────────────┤   │      │    endpoint          │
+└──────────────────────┘      │  │  Conversion Layer (conversion.py)     │   │      └──────────────────────┘
+                              │  │  - anthropic_to_openai()              │   │
+                              │  │  - openai_to_anthropic_response()     │   │
+                              │  ├───────────────────────────────────────┤   │
+                              │  │  SSE Parser (sse.py)                 │   │
+                              │  │  - Incremental chunk parsing          │   │
+                              │  │  - Stop reason mapping                │   │
+                              │  ├───────────────────────────────────────┤   │
+                              │  │  Retry Logic (retry.py)              │   │
+                              │  │  - Exponential backoff (cap 30s)      │   │
+                              │  │  - Retry-After header support         │   │
+                              │  ├───────────────────────────────────────┤   │
+                              │  │  Model Map (settings.py)             │   │
+                              │  │  - Anthropic → OpenAI name mapping    │   │
+                              │  └───────────────────────────────────────┘   │
+                              └───────────────────────────────────────────────┘
+```
+
+**请求流程：**
+
+1. 客户端向 Claudify 发送 Anthropic Messages API 请求。
+2. Claudify 验证入站认证（如已配置）并将请求转换为 OpenAI 格式。
+3. 请求转发到配置的 OpenAI 兼容后端。
+4. 后端响应转换回 Anthropic 格式。
+5. 转换后的响应流式返回或一次性返回给客户端。
+
+## 使用场景
+
+### 使用 Claude Code 调用 OpenAI 模型
+
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) 原生使用 Anthropic Messages API。运行 Claudify 后，将 Claude Code 指向代理即可使用任意 OpenAI 兼容模型：
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:4000 ANTHROPIC_API_KEY=*** claude
+```
+
+### 使用 Anthropic SDK 对接任意 OpenAI 兼容 API
+
+任何使用 Anthropic Python SDK 的工具都能通过 Claudify 对接 OpenAI 兼容后端：
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="http://127.0.0.1:4000",
+    api_key="any-value",
+)
+
+message = client.messages.create(
+    model="claude-sonnet-4-6",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(message.content[0].text)
+```
+
+### 多后端负载均衡
+
+在不同端口运行多个 Claudify 实例，每个实例指向不同后端，然后使用反向代理（如 nginx 或 HAProxy）进行负载均衡：
+
+```toml
+# 后端 1
+backend_base = "http://10.0.1.10:8000/v1"
+api_key = "sk-backend1"
+port = 4001
+
+# 后端 2
+backend_base = "http://10.0.1.20:8000/v1"
+api_key = "sk-backend2"
+port = 4002
+```
+
 ## 功能
 
 - 完整 Anthropic Messages API ↔ OpenAI Chat Completions 双向翻译
@@ -122,6 +204,86 @@ default_model = "hermes-agent"
 | `cors_origins` | _(仅 TOML)_ | `[]` | CORS 允许的来源列表 |
 | `max_body_size` | `CLAUDIFY_MAX_BODY_SIZE` | `10485760` | 最大请求体大小（字节） |
 | `upstream_health_path` | `CLAUDIFY_UPSTREAM_HEALTH_PATH` | _(空)_ | 上游健康检查路径 |
+
+## 安全
+
+### 入站认证
+
+在配置中设置 `inbound_api_key` 以要求入站请求进行认证。客户端必须在 `x-api-key` 请求头中携带此密钥：
+
+```bash
+curl -H "x-api-key: your-secret-key" http://127.0.0.1:4000/v1/messages ...
+```
+
+> **注意：** 入站认证仅用于代理访问控制，密钥不会转发到上游。
+
+### 上游认证
+
+在配置中设置 `api_key` 以认证 OpenAI 兼容后端。该值会作为 `Bearer` token 通过 `Authorization` 请求头发送给上游服务。
+
+### 配置文件权限
+
+配置文件 `~/.config/claudify/config.toml` 创建时权限为 `0600`（仅所有者可读写），防止系统中其他用户读取你的 API 密钥：
+
+```bash
+ls -la ~/.config/claudify/config.toml
+# -rw------- 1 user user ... config.toml
+```
+
+### 错误信息脱敏
+
+Claudify 在将上游后端的错误信息转发给客户端之前会进行脱敏处理。敏感信息（API 密钥、内部 URL、堆栈跟踪）会通过正则表达式进行屏蔽，防止信息泄露。
+
+## 性能
+
+### 连接池设置
+
+| 设置项 | 默认值 | 说明 |
+| ------- | ------- | ----------- |
+| `pool_limit` | `100` | httpx 连接池最大并发连接数 |
+| `pool_timeout` | `300s` | 从连接池获取连接的最大等待时间 |
+| `connect_timeout` | `300s` | 建立新连接的最大超时时间 |
+
+对于高并发工作负载，建议增加 `pool_limit` 并确保后端能承受相应的连接数。
+
+### 超时建议
+
+| 工作负载类型 | `read_timeout` | 备注 |
+| ------------- | -------------- | ----- |
+| 流式（默认） | `300s` | 流式请求内部绕过读取超时，此值为安全兜底 |
+| 非流式（短） | `60s` | 快速完成的请求 |
+| 非流式（长） | `300–600s` | 大上下文或复杂提示 |
+
+流式请求使用 `httpx` 的 `timeout(streaming=True)`，默认将 `read` 设为 `None`（无限）。`read_timeout` 仅适用于非流式响应。
+
+### 重试策略
+
+| 设置项 | 默认值 | 建议 |
+| ------- | ------- | -------------- |
+| `retry_attempts` | `0` | 生产环境建议设为 `2–3`，以处理临时性 5xx/429 错误 |
+| `retry_backoff` | `0.5` | 保持 `0.5` 即可；退避时间每次翻倍，上限 30 秒 |
+
+- 重试适用于 **5xx**（服务器错误）和 **429**（速率限制）响应。
+- 429 响应会尊重 `Retry-After` 请求头。
+- 重试会消耗上游额外的 token/时间，对昂贵的模型应避免过多重试次数。
+
+## 故障排查
+
+| 症状 | 可能原因 | 解决方案 |
+| ------- | ------------ | --- |
+| 调用后端时 `Connection refused` | OpenAI 兼容后端未运行 | 启动后端并确认 `backend_base` 指向正确的 URL |
+| 上游后端返回 `401 Unauthorized` | 上游 API 密钥无效或缺失 | 在 `config.toml` 或通过 `CLAUDIFY_API_KEY` 设置正确的 `api_key` |
+| 调用 Claudify 时 `401 Unauthorized` | 已设置 `inbound_api_key` 但客户端未提供 | 在请求中添加 `x-api-key` 头，或取消设置 `inbound_api_key` |
+| 流式超时 | 读取超时对于长响应来说太短 | 在配置中增加 `read_timeout` 或 `request_timeout`（默认：300s） |
+| `Model not found` 错误 | 请求的模型名不在 `model_map` 中且未设置 `default_model` | 在配置中添加 `[model_map]` 条目或设置 `default_model` |
+| 响应为空或内容异常 | 上游模型不支持请求的功能（如工具调用） | 检查上游模型的能力；参见下方已知不支持的功能 |
+
+开启调试日志以诊断问题：
+
+```toml
+log_level = "DEBUG"
+log_format = "json"
+```
 
 ## 已知不支持
 
