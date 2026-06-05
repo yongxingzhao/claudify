@@ -86,6 +86,9 @@ default_model = "hermes-agent"
 | `inbound_api_key` | `CLAUDIFY_INBOUND_API_KEY` | _(empty)_ | If set, require this key in inbound `x-api-key` header. |
 | `host` | `CLAUDIFY_HOST` | `127.0.0.1` | Bind address. |
 | `port` | `CLAUDIFY_PORT` | `4000` | Bind port. |
+| `log_level` | `CLAUDIFY_LOG_LEVEL` | `INFO` | Logging level: DEBUG, INFO, WARNING, ERROR. |
+| `log_format` | `CLAUDIFY_LOG_FORMAT` | `text` | `text` (default) or `json` for structured logging. |
+| `pool_limit` | `CLAUDIFY_POOL_LIMIT` | `100` | Max connections in httpx pool. |
 | `connect_timeout` | `CLAUDIFY_CONNECT_TIMEOUT` | _(same as request_timeout)_ | Connection timeout (seconds). |
 | `read_timeout` | `CLAUDIFY_READ_TIMEOUT` | _(same as request_timeout)_ | Read timeout for non-streaming. |
 | `write_timeout` | `CLAUDIFY_WRITE_TIMEOUT` | _(same as request_timeout)_ | Write timeout. |
