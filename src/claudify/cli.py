@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import sys
 import textwrap
 from pathlib import Path
 
@@ -74,10 +75,29 @@ app._add_completion = True  # enable the hook
 
 _orig_get_command = typer.main.get_command
 
+# Handled early flag — set by _patched_get_command to skip the Typer callback
+_handled_completion = False
+
 
 def _patched_get_command(ti):
+    global _handled_completion
+    # Handle --completion with optional shell argument BEFORE Typer parses.
+    # Typer's is_flag=True options can't accept a value, so we intercept
+    # "claudify --completion [bash|zsh|fish]" in sys.argv directly.
+    args = sys.argv[1:]
+    if "--completion" in args:
+        idx = args.index("--completion")
+        # Check if next arg is a shell name (not another flag or subcommand)
+        shell_value = None
+        if idx + 1 < len(args) and args[idx + 1] in ("bash", "zsh", "fish"):
+            shell_value = args[idx + 1]
+            args.pop(idx + 1)
+        args.pop(idx)
+        sys.argv[1:] = args
+        _handled_completion = True
+        _completion_callback(shell_value)
+
     cmd = _orig_get_command(ti)
-    # Remove the auto-added --install-completion / --show-completion params
     cmd.params = [p for p in cmd.params if p.name not in ("install_completion", "show_completion")]
     return cmd
 
@@ -92,7 +112,8 @@ def _main(
         help="Show shell completion instructions (auto-detects shell from $SHELL)",
     ),
 ) -> None:
-    if completion:
+    # Fallback for bare --completion (no shell arg) handled by Typer's is_flag
+    if completion and not _handled_completion:
         _completion_callback(None)
 
 
