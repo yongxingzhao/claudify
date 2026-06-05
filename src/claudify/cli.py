@@ -21,22 +21,22 @@ def _completion_info(shell: str) -> str:
     snippets = {
         "bash": (
             f"# temporary (current session):\n"
-            f'eval "$({var}=source {prog})"\n\n'
+            f'eval "$({var}=complete_bash {prog})"\n\n'
             f"# permanent (~/.bashrc):\n"
-            f'echo \'eval "$({var}=source {prog})"\' >> ~/.bashrc'
+            f'echo \'eval "$({var}=complete_bash {prog})"\' >> ~/.bashrc'
         ),
         "zsh": (
             f"# temporary (current session):\n"
-            f'eval "$({var}=source {prog})"\n\n'
+            f'eval "$({var}=complete_zsh {prog})"\n\n'
             f"# permanent (~/.zshrc):\n"
-            f'echo \'eval "$({var}=source {prog})"\' >> ~/.zshrc'
+            f'echo \'eval "$({var}=complete_zsh {prog})"\' >> ~/.zshrc'
         ),
         "fish": (
             f"# temporary (current session):\n"
-            f"{prog} --completion {shell} | source\n\n"
+            f"{var}=complete_fish {prog} | source\n\n"
             f"# permanent:\n"
             f"mkdir -p ~/.config/fish/completions\n"
-            f"{prog} --completion {shell} > ~/.config/fish/completions/{prog}.fish"
+            f"{var}=complete_fish {prog} > ~/.config/fish/completions/{prog}.fish"
         ),
     }
     return snippets.get(shell, snippets["bash"])
@@ -50,10 +50,13 @@ def _detect_shell() -> str:
     return "bash"
 
 
-def _completion_callback(value: str) -> None:
-    if not value:
-        return
-    shell = value if value in ("bash", "zsh", "fish") else _detect_shell()
+def _completion_callback(value: str | None) -> None:
+    if value is None:
+        shell = _detect_shell()
+    elif value in ("bash", "zsh", "fish"):
+        shell = value
+    else:
+        shell = _detect_shell()
     typer.echo(f"# Shell completion for {shell}\n")
     typer.echo(_completion_info(shell))
     raise typer.Exit(0)
@@ -68,13 +71,13 @@ app = typer.Typer(
 
 @app.callback(invoke_without_command=True)
 def _main(
-    completion: str = typer.Option(
-        "", "--completion",
-        help="Show shell completion (bash/zsh/fish, auto-detected if omitted)",
+    completion: bool = typer.Option(
+        False, "--completion",
+        help="Show shell completion instructions (auto-detects shell from $SHELL)",
     ),
 ) -> None:
-    if completion is not None:
-        _completion_callback(completion)
+    if completion:
+        _completion_callback(None)
 
 
 # ---------------------------------------------------------------------------
