@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -32,6 +33,35 @@ class RequestIdMiddleware:
             scope.setdefault("state", {})
             scope["state"]["request_id"] = rid
         await self.app(scope, receive, send)
+
+
+class ConcurrencyLimitMiddleware:
+    """ASGI middleware that rejects requests when concurrency exceeds the limit."""
+
+    def __init__(self, app: Any, max_concurrency: int) -> None:
+        self.app = app
+        self._max = max_concurrency
+        self._active = 0
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if self._active >= self._max:
+            # Return 503 Service Unavailable
+            body = json.dumps({
+                "type": "error",
+                "error": {"type": "overloaded_error", "message": "Server is overloaded, please retry"},
+            }).encode()
+            await send({"type": "http.response.start", "status": 503,
+                        "headers": [[b"content-type", b"application/json"]]})
+            await send({"type": "http.response.body", "body": body})
+            return
+        self._active += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self._active -= 1
 
 
 def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClient | None = None) -> FastAPI:
@@ -65,6 +95,7 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
     app.state.metrics = metrics
 
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(ConcurrencyLimitMiddleware, max_concurrency=settings.pool_limit)
 
     if settings.cors_origins:
         app.add_middleware(
@@ -90,12 +121,22 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
         )
 
     @app.get("/v1/models")
-    async def _list_models() -> dict[str, Any]:
-        return await list_models(settings=app.state.settings)
+    async def _list_models(request: Request) -> Response:
+        rid = getattr(request.state, "request_id", "")
+        data = await list_models(settings=app.state.settings)
+        resp = Response(content=json.dumps(data), media_type="application/json")
+        if rid:
+            resp.headers["x-request-id"] = rid
+        return resp
 
     @app.get("/health")
-    async def _health() -> dict[str, Any]:
-        return await health(client=app.state.http_client, settings=app.state.settings)
+    async def _health(request: Request) -> Response:
+        rid = getattr(request.state, "request_id", "")
+        data = await health(client=app.state.http_client, settings=app.state.settings)
+        resp = Response(content=json.dumps(data), media_type="application/json")
+        if rid:
+            resp.headers["x-request-id"] = rid
+        return resp
 
     @app.get("/metrics")
     async def _metrics() -> Response:
@@ -103,6 +144,10 @@ def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClie
 
     @app.post("/v1/messages/count_tokens")
     async def _count_tokens(request: Request) -> Response:
-        return await count_tokens(request, settings=app.state.settings)
+        rid = getattr(request.state, "request_id", "")
+        resp = await count_tokens(request, settings=app.state.settings)
+        if rid:
+            resp.headers["x-request-id"] = rid
+        return resp
 
     return app

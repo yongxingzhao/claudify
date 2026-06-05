@@ -19,11 +19,16 @@ else:
 
 log = logging.getLogger("claudify.settings")
 
+
+class ConfigurationError(Exception):
+    """Raised when the configuration file contains invalid values."""
+
+
 _VALID_FIELDS = {
     "backend_base", "api_key", "inbound_api_key", "host", "port", "log_level", "log_format",
     "request_timeout", "connect_timeout", "read_timeout", "write_timeout", "pool_timeout",
     "retry_attempts", "retry_backoff", "max_body_size", "pool_limit",
-    "model_map", "default_model", "cors_origins", "upstream_health_path",
+    "model_map", "default_model", "cors_origins", "upstream_health_path", "debug_log_payloads",
 }
 
 
@@ -67,6 +72,8 @@ class Settings(BaseSettings):
 
     upstream_health_path: str = Field(default="")
 
+    debug_log_payloads: bool = Field(default=False)
+
     model_config = SettingsConfigDict(
         env_prefix="CLAUDIFY_",
         env_file=None,
@@ -93,5 +100,4 @@ class Settings(BaseSettings):
         try:
             return cls(**toml_data)
         except Exception as exc:
-            log.error("invalid configuration in %s: %s", path, exc)
-            raise SystemExit(1) from exc
+            raise ConfigurationError(f"invalid configuration in {path}: {exc}") from exc

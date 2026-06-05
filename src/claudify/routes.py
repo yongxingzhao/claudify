@@ -57,16 +57,9 @@ def _build_headers(request: Request, settings: Settings) -> dict[str, str]:
 
 
 def _validate_messages_payload(body: bytes, settings: Settings) -> tuple[dict[str, Any] | None, Response | None]:
-    if len(body) > settings.max_body_size:
-        return None, make_error_response("invalid_request_error", "Request body too large", 413)
-
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return None, make_error_response("invalid_request_error", "Invalid JSON", 400)
-
-    if not isinstance(payload, dict):
-        return None, make_error_response("invalid_request_error", "Request must be a JSON object", 400)
+    payload, err = _parse_body(body, settings)
+    if err:
+        return None, err
     if "model" not in payload:
         return None, make_error_response("invalid_request_error", "Missing required field: model", 400)
     model = payload.get("model")
@@ -90,6 +83,24 @@ def _add_request_id(response: Response, request: Request) -> Response:
     if rid:
         response.headers["x-request-id"] = rid
     return response
+
+
+def _json_response(data: Any) -> Response:
+    """Build a JSON Response from a serializable object."""
+    return Response(content=json.dumps(data, ensure_ascii=False), media_type="application/json")
+
+
+def _parse_body(body: bytes, settings: Settings) -> tuple[dict[str, Any] | None, Response | None]:
+    """Common body-size check and JSON parse. Returns (payload, error_response)."""
+    if len(body) > settings.max_body_size:
+        return None, make_error_response("invalid_request_error", "Request body too large", 413)
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None, make_error_response("invalid_request_error", "Invalid JSON", 400)
+    if not isinstance(payload, dict):
+        return None, make_error_response("invalid_request_error", "Request must be a JSON object", 400)
+    return payload, None
 
 
 def _check_inbound_auth(request: Request, settings: Settings) -> Response | None:
@@ -218,9 +229,11 @@ async def _handle_nonstreaming(
     elapsed = time.monotonic() - t0
     metrics.record_request("/v1/messages", elapsed, r.status_code)
     log.info("rid=%s completed in %.3fs status=%d", rid, elapsed, r.status_code)
-    result = openai_to_anthropic_response(data, payload.get("model", ""), settings.model_map)
-    resp = Response(content=json.dumps(result), media_type="application/json")
-    return _add_request_id(resp, request)
+    result = openai_to_anthropic_response(data, payload.get("model", ""))
+    if settings.debug_log_payloads:
+        log.debug("rid=%s upstream response: %s", rid, json.dumps(data, ensure_ascii=False)[:2000])
+        log.debug("rid=%s anthropic response: %s", rid, json.dumps(result, ensure_ascii=False)[:2000])
+    return _add_request_id(_json_response(result), request)
 
 
 async def messages(request: Request, client: httpx.AsyncClient, settings: Settings, metrics: Metrics) -> Response:
@@ -242,6 +255,9 @@ async def messages(request: Request, client: httpx.AsyncClient, settings: Settin
     headers = _build_headers(request, settings)
 
     log.info("rid=%s model=%s -> %s stream=%s", rid, payload.get("model"), openai_payload.get("model"), is_stream)
+    if settings.debug_log_payloads:
+        log.debug("rid=%s inbound payload: %s", rid, json.dumps(payload, ensure_ascii=False)[:2000])
+        log.debug("rid=%s openai payload: %s", rid, json.dumps(openai_payload, ensure_ascii=False)[:2000])
 
     if is_stream:
         return await _handle_streaming(request, client, payload, openai_payload, headers, settings, metrics, rid, t0)
@@ -262,7 +278,11 @@ async def list_models(settings: Settings) -> dict[str, Any]:
 
 
 async def health(client: httpx.AsyncClient, settings: Settings) -> dict[str, Any]:
-    result: dict[str, Any] = {"status": "ok"}
+    import claudify
+    result: dict[str, Any] = {
+        "status": "ok",
+        "version": getattr(claudify, "__version__", "unknown"),
+    }
     if settings.upstream_health_path:
         try:
             r = await client.get(
@@ -285,16 +305,10 @@ async def count_tokens(request: Request, settings: Settings) -> Response:
         return auth_err
 
     body = await request.body()
-    if len(body) > settings.max_body_size:
-        return make_error_response("invalid_request_error", "Request body too large", 413)
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return make_error_response("invalid_request_error", "Invalid JSON", 400)
-    finally:
-        body = None
-    if not isinstance(payload, dict):
-        return make_error_response("invalid_request_error", "Request must be a JSON object", 400)
+    payload, err = _parse_body(body, settings)
+    body = None
+    if err:
+        return err
     if "model" not in payload:
         return make_error_response("invalid_request_error", "Missing required field: model", 400)
     model = payload.get("model")
@@ -326,11 +340,8 @@ async def count_tokens(request: Request, settings: Settings) -> Response:
             _count_text(extract_text_from_blocks(m.get("content")))
 
     estimated = max(total_words, total_chars // 4)
-    return Response(
-        content=json.dumps({
-            "id": f"ctkn_{uuid.uuid4().hex[:24]}",
-            "type": "token_count",
-            "input_tokens": estimated,
-        }),
-        media_type="application/json",
-    )
+    return _json_response({
+        "id": f"ctkn_{uuid.uuid4().hex[:24]}",
+        "type": "token_count",
+        "input_tokens": estimated,
+    })

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import os
 import platform
@@ -12,7 +13,7 @@ from pathlib import Path
 import typer
 import uvicorn
 
-from claudify.settings import Settings, default_config_path
+from claudify.settings import ConfigurationError, Settings, default_config_path
 
 
 def _completion_info(shell: str) -> str:
@@ -163,15 +164,17 @@ class _JsonFormatter(logging.Formatter):
     """Emit one JSON object per log line with proper escaping."""
 
     def format(self, record: logging.LogRecord) -> str:
-        import json as _json
-
         obj = {
             "time": self.formatTime(record),
-            "level": record.name,
+            "logger": record.name,
             "severity": record.levelname,
             "msg": record.getMessage(),
         }
-        return _json.dumps(obj, ensure_ascii=False)
+        if record.exc_info and record.exc_info[0] is not None:
+            obj["exc_info"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            obj["stack_info"] = self.formatStack(record.stack_info)
+        return json.dumps(obj, ensure_ascii=False)
 
 
 def _print_startup_banner(settings: Settings) -> None:
@@ -220,7 +223,11 @@ def install_service(
     backend: str = typer.Option("", help="Override backend_base from config"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be installed without doing it"),
 ) -> None:
-    s = Settings.load()
+    try:
+        s = Settings.load()
+    except ConfigurationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
     be = backend or s.backend_base
 
     cfg = default_config_path()
@@ -268,7 +275,11 @@ def show_config(
     config: Path = typer.Option(None, "--config", "-c", help="Path to config.toml"),
 ) -> None:
     """Display the current effective settings (useful for debugging)."""
-    s = Settings.load(config_path=config)
+    try:
+        s = Settings.load(config_path=config)
+    except ConfigurationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
     lines = [
         f"backend_base   = {s.backend_base!r}",
         f"api_key        = {'***' if s.api_key else '(not set)'}",
@@ -303,7 +314,11 @@ def run(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Set log level to DEBUG"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Set log level to WARNING"),
 ) -> None:
-    s = Settings.load(config_path=config)
+    try:
+        s = Settings.load(config_path=config)
+    except ConfigurationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
     h = host or s.host
     p = port or s.port
     if verbose:

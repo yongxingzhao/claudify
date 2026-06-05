@@ -28,7 +28,16 @@ def _compute_wait(backoff: float, attempt: int, response: httpx.Response | None 
             try:
                 wait = max(wait, float(retry_after))
             except ValueError:
-                pass
+                # Retry-After may be an HTTP-date (RFC 7231)
+                from email.utils import parsedate_to_datetime
+                try:
+                    target = parsedate_to_datetime(retry_after)
+                    from datetime import datetime, timezone
+                    delta = (target - datetime.now(timezone.utc)).total_seconds()
+                    if delta > 0:
+                        wait = max(wait, min(delta, MAX_BACKOFF))
+                except (ValueError, TypeError):
+                    pass
     return wait
 
 
@@ -59,7 +68,7 @@ async def stream_with_retry(
                 await r.aclose()
                 log.warning("stream retry %d/%d after status %d", attempt + 1, attempts, r.status_code)
                 await asyncio.sleep(wait)
-        except (httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
+        except httpx.TransportError as exc:
             last_exc = exc
             if attempt < attempts - 1:
                 log.warning("stream retry %d/%d after %s", attempt + 1, attempts, type(exc).__name__)
@@ -84,7 +93,7 @@ async def _do_retry(
             log.warning("retry %d/%d after status %d", attempt + 1, attempts, r.status_code)
             await r.aclose()
             await asyncio.sleep(_compute_wait(backoff, attempt, r))
-        except (httpx.ConnectError, httpx.ReadError, httpx.WriteError) as exc:
+        except httpx.TransportError as exc:
             last_exc = exc
             if attempt >= attempts - 1:
                 raise

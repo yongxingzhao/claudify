@@ -19,12 +19,10 @@ _STATUS_TO_TYPE: dict[int, str] = {
     504: "timeout_error",
 }
 
-_SECRET_PATTERNS = [
-    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
-    re.compile(r"\bkey-[A-Za-z0-9]{8,}\b"),
-    re.compile(r"\btoken-[A-Za-z0-9]{8,}\b"),
-    re.compile(r"\bBearer\s+\S+", re.IGNORECASE),
-]
+_SECRET_PATTERN = re.compile(
+    r"\b(?:sk|key|token)-[A-Za-z0-9]{8,}\b|\bBearer\s+\S+",
+    re.IGNORECASE,
+)
 
 
 def _error_type_for_status(status: int) -> str:
@@ -32,9 +30,7 @@ def _error_type_for_status(status: int) -> str:
 
 
 def _sanitize_error_message(message: str) -> str:
-    for pat in _SECRET_PATTERNS:
-        message = pat.sub("[REDACTED]", message)
-    return message
+    return _SECRET_PATTERN.sub("[REDACTED]", message)
 
 
 def make_error_response(error_type: str, message: str, status: int) -> JSONResponse:

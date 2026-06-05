@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `log_format` placeholder in `init-config` template
 - Streaming requests now use `httpx_timeout(streaming=True)` (read=None) to avoid timeout on long streams
 - `429` (rate limit) responses are now retried alongside `5xx` errors
-- Respect `Retry-After` header on 429 responses during retry
+- Respect `Retry-After` header on 429 responses (both seconds and HTTP-date format)
 - Backoff cap at 30 seconds to avoid excessively long waits
 - `created_at` timestamp in both streaming and non-streaming responses
 - Request duration logged on successful requests (both streaming and non-streaming)
@@ -20,7 +20,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Streaming requests now record metrics on completion
 - `count_tokens` endpoint now requires `inbound_api_key` auth when configured
 - `count_tokens` response now includes `id` and `type` fields per Anthropic spec
+- `count_tokens` now requires `model` field and validates it
 - Warning logged when messages with unsupported roles are dropped
+- `debug_log_payloads` setting: log full request/response payloads at DEBUG level
+- `ConcurrencyLimitMiddleware`: rejects requests with 503 when concurrency exceeds `pool_limit`
+- Health endpoint now includes `version` field
+- `x-request-id` header now included on all endpoint responses (health, models, count_tokens)
 
 ### Changed
 - `inbound_api_key` comparison uses `hmac.compare_digest` to prevent timing attacks
@@ -48,7 +53,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Stream interruption recorded as 502 in metrics (was incorrectly 200)
 - SSE parser normalizes CRLF line endings for cross-platform compatibility
 - SSE parser tracks buffer length incrementally (O(1) per feed instead of O(n))
-- `Settings.load()` now exits with a clear error message on validation errors
+- `Settings.load()` raises `ConfigurationError` (catchable) instead of `SystemExit`
+- CLI catches `ConfigurationError` and exits with a clear message
+- retry.py catches `httpx.TransportError` (base class) for all transport failures during retry
+- User text content placed before tool_result messages in conversion (correct semantic ordering)
+- `openai_to_anthropic_response` no longer accepts unused `model_map` parameter
+- `_parse_tool_arguments` returns `{}` with a warning instead of `{"_raw": ...}` for malformed JSON
+- JSON log formatter now uses `json.dumps()` for proper escaping, includes `exc_info` and `stack_info`
+- `count_tokens` now counts `tool_use` blocks in token estimation
 - protocol-mapping.md updated: model field always returns client-requested name
 
 ### Fixed

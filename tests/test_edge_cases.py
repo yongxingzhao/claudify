@@ -717,12 +717,10 @@ def test_parse_tool_arguments_valid_dict():
 
 
 def test_parse_tool_arguments_non_dict_json():
-    """Valid JSON but not a dict (e.g. list) → _raw fallback."""
-    assert _parse_tool_arguments("[1, 2]") == {"_raw": "[1, 2]"}
+    """Valid JSON but not a dict (e.g. list) → empty dict with warning."""
+    assert _parse_tool_arguments("[1, 2]") == {}
 
-
-def test_parse_tool_arguments_invalid_json():
-    assert _parse_tool_arguments("not json") == {"_raw": "not json"}
+    assert _parse_tool_arguments("not json") == {}
 
 
 def test_parse_tool_arguments_unicode():
@@ -1091,6 +1089,17 @@ def test_sse_parser_event_prefix_ignored():
     parser = SSEParser()
     events = parser.feed("event: message\ndata: {\"ok\":true}\nid: 1\n\n")
     assert len(events) == 1
+
+
+def test_sse_parser_mixed_bytes_and_str():
+    """Alternating bytes and str inputs should parse correctly."""
+    parser = SSEParser()
+    events: list[dict] = []
+    events.extend(parser.feed(b'data: {"a":1}\n\n'))
+    events.extend(parser.feed('data: {"b":2}\n\n'))
+    assert len(events) == 2
+    assert events[0] == {"a": 1}
+    assert events[1] == {"b": 2}
 
 
 # ============================================================================

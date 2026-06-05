@@ -1,4 +1,4 @@
-"""Pure functions for Anthropic <-> OpenAI protocol conversion."""
+"""Anthropic <-> OpenAI protocol conversion utilities."""
 
 from __future__ import annotations
 
@@ -223,14 +223,16 @@ def anthropic_to_openai(
     if sys_text.strip():
         out_messages.append({"role": "system", "content": sys_text})
 
+    has_user = False
     for msg in payload.get("messages", []):
         role = msg.get("role")
         content = msg.get("content")
         if role == "user":
             user_content, tool_msgs = _user_content_to_openai(content)
-            out_messages.extend(tool_msgs)
             if user_content not in ("", []):
                 out_messages.append({"role": "user", "content": user_content})
+                has_user = True
+            out_messages.extend(tool_msgs)
         elif role == "assistant":
             text, tool_calls = _assistant_content_to_openai(content)
             entry: dict[str, Any] = {"role": "assistant"}
@@ -244,7 +246,6 @@ def anthropic_to_openai(
         else:
             log.warning("dropping message with unsupported role: %r", role)
 
-    has_user = any(m["role"] == "user" for m in out_messages)
     if not has_user:
         out_messages.append({"role": "user", "content": "."})
 
@@ -289,12 +290,12 @@ def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
         if isinstance(parsed, dict):
             return parsed
     except json.JSONDecodeError:
-        pass
-    return {"_raw": arguments}
+        log.warning("failed to parse tool arguments as JSON: %.100s", arguments)
+    return {}
 
 
 def openai_to_anthropic_response(
-    openai_resp: dict[str, Any], original_model: str, model_map: dict[str, str] | None = None,
+    openai_resp: dict[str, Any], original_model: str,
 ) -> dict[str, Any]:
     choice = (openai_resp.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
@@ -422,12 +423,11 @@ def _handle_tool_call(
     return next_index, text_block_open
 
 
-def _build_finalization_events(
+def _close_open_blocks(
     text_block_open: bool, text_block_index: int,
     tool_state: dict[int, dict[str, Any]],
-    finish_reason: str, upstream_usage: dict[str, Any] | None,
 ) -> list[bytes]:
-    """Build the closing content_block_stop, message_delta, and message_stop events."""
+    """Emit content_block_stop events for any open text/tool blocks."""
     events: list[bytes] = []
     if text_block_open:
         events.append(sse_event(
@@ -439,6 +439,16 @@ def _build_finalization_events(
             "content_block_stop",
             {"type": "content_block_stop", "index": state["block_index"]},
         ))
+    return events
+
+
+def _build_finalization_events(
+    text_block_open: bool, text_block_index: int,
+    tool_state: dict[int, dict[str, Any]],
+    finish_reason: str, upstream_usage: dict[str, Any] | None,
+) -> list[bytes]:
+    """Build the closing content_block_stop, message_delta, and message_stop events."""
+    events = _close_open_blocks(text_block_open, text_block_index, tool_state)
     stop_reason = STOP_REASON_MAP.get(finish_reason, "end_turn")
     events.append(sse_event(
         "message_delta",
@@ -543,16 +553,8 @@ async def stream_openai_to_anthropic(
 
     except Exception:
         # On error, close any open blocks and emit synthetic stop
-        if text_block_open:
-            yield sse_event(
-                "content_block_stop",
-                {"type": "content_block_stop", "index": text_block_index},
-            )
-        for state in tool_state.values():
-            yield sse_event(
-                "content_block_stop",
-                {"type": "content_block_stop", "index": state["block_index"]},
-            )
+        for ev in _close_open_blocks(text_block_open, text_block_index, tool_state):
+            yield ev
         for _ev in synthetic_stop_events(finish_reason, upstream_usage):
             yield _ev
         return

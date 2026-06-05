@@ -317,7 +317,7 @@ def test_malformed_tool_arguments():
         ],
     }
     out = openai_to_anthropic_response(resp, "m")
-    assert out["content"][0]["input"] == {"_raw": "not-json"}
+    assert out["content"][0]["input"] == {}
 
 
 def test_user_field_to_metadata():
@@ -382,8 +382,7 @@ def test_model_name_always_original():
         "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 5, "completion_tokens": 3},
     }
-    model_map = {"claude-opus-4-7": "gpt-4"}
-    out = openai_to_anthropic_response(resp, "claude-opus-4-7", model_map)
+    out = openai_to_anthropic_response(resp, "claude-opus-4-7")
     # Always returns original model name, not the upstream name
     assert out["model"] == "claude-opus-4-7"
 
