@@ -14,7 +14,7 @@ import uvicorn
 
 from claudify.settings import Settings, default_config_path
 
-app = typer.Typer(help="Claudify: Anthropic-to-OpenAI translation proxy")
+app = typer.Typer(help="Claudify: Anthropic-to-OpenAI translation proxy", no_args_is_help=True)
 
 
 # ---------------------------------------------------------------------------
