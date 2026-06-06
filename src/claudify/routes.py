@@ -25,7 +25,6 @@ from claudify.errors import make_error_response, passthrough_error
 from claudify.metrics import Metrics
 from claudify.retry import post_with_retry, stream_with_retry
 from claudify.settings import Settings
-from claudify.sse import synthetic_stop_events
 
 log = logging.getLogger("claudify")
 
@@ -118,16 +117,18 @@ async def _stream_response(
 ) -> AsyncIterator[bytes]:
     """Yield SSE chunks from an OpenAI streaming response, converting to Anthropic format."""
     interrupted = False
+    gen = stream_openai_to_anthropic(r.aiter_bytes(), payload.get("model", ""))
     try:
-        async for chunk in stream_openai_to_anthropic(
-            r.aiter_bytes(), payload.get("model", ""),
-        ):
+        async for chunk in gen:
             yield chunk
+        # Check if the converter stored an error (it yields synthetic stop
+        # events before returning on error, so async for completes normally).
+        if getattr(gen, "_last_error", None):
+            interrupted = True
+            log.warning("rid=%s stream interrupted: %s", rid, gen._last_error, exc_info=gen._last_error)
     except Exception:
         interrupted = True
         log.warning("rid=%s stream interrupted", rid, exc_info=True)
-        for ev in synthetic_stop_events("stop", None):
-            yield ev
     finally:
         await r.aclose()
         stream_elapsed = time.monotonic() - t0
@@ -290,7 +291,7 @@ async def health(client: httpx.AsyncClient, settings: Settings) -> dict[str, Any
                 timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0),
             )
             result["upstream"] = "ok" if r.status_code < 400 else ("misconfigured" if r.status_code == 404 else "degraded")
-        except (httpx.TimeoutException, httpx.ConnectError):
+        except httpx.TransportError:
             result["upstream"] = "unreachable"
     return result
 
@@ -340,8 +341,8 @@ async def count_tokens(request: Request, settings: Settings) -> Response:
             _count_text(extract_text_from_blocks(m.get("content")))
 
     estimated = max(total_words, total_chars // 4)
-    return _json_response({
+    return _add_request_id(_json_response({
         "id": f"ctkn_{uuid.uuid4().hex[:24]}",
         "type": "token_count",
         "input_tokens": estimated,
-    })
+    }), request)

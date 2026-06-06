@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(_CLAUDIFY_COMPLETE=bash_source uv run claudify)",
+      "Bash(_CLAUDIFY_COMPLETE=zsh_source uv run claudify)",
+      "Bash(uv run *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'fix\\(cli\\): correct completion format and auto-detect shell on bare --completion *)",
+      "Bash(git *)",
+      "Bash(python *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(python3 -c \"import importlib.metadata; print\\('installed click:', importlib.metadata.version\\('click'\\)\\)\")",
+      "Bash(/home/yoxi/src/claudify/.venv/bin/python3 -c \"import importlib.metadata; print\\('dev click:', importlib.metadata.version\\('click'\\)\\)\")",
+      "Bash(/home/yoxi/.local/share/uv/tools/claudify/bin/python3 *)",
+      "Bash(uv tool *)",
+      "Bash(claudify --completion)",
+      "Bash(gh run *)",
+      "Bash(claudify --help)",
+      "Bash(claudify --completion bash)",
+      "Bash(claudify --completion fish)",
+      "Bash(claudify version *)"
+    ]
+  }
+}

@@ -25,6 +25,7 @@ def make_client():
         upstream_health_path: str = "",
         inbound_api_key: str = "",
         api_key: str = "test-key",
+        pool_limit: int = 100,
     ) -> tuple[httpx.AsyncClient, Settings]:
         s = Settings(
             backend_base="http://test-backend/v1",
@@ -37,6 +38,7 @@ def make_client():
             retry_backoff=retry_backoff,
             cors_origins=cors_origins or [],
             upstream_health_path=upstream_health_path,
+            pool_limit=pool_limit,
         )
         mock_transport = httpx.MockTransport(handler)
         mock_client = httpx.AsyncClient(

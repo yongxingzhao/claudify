@@ -763,3 +763,66 @@ async def test_unhandled_exception_returns_api_error(make_client, chat_response)
     body2 = json.loads(resp2.body)
     assert "internal error" in body2["error"]["message"]
     await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_concurrency_limit_returns_503(make_client, chat_response):
+    """Requests exceeding pool_limit should get 503 overloaded_error."""
+    import asyncio
+
+    proceed = asyncio.Event()
+    call_count = 0
+
+    async def slow_handler(r):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            await proceed.wait()  # block first request
+        return httpx.Response(200, json=chat_response(body="hi"))
+
+    # pool_limit=1 means ConcurrencyLimitMiddleware rejects at 1 active request
+    client, _ = make_client(slow_handler, pool_limit=1)
+
+    # Start first request (will block)
+    task1 = asyncio.create_task(client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    }))
+    await asyncio.sleep(0.05)  # let first request start
+
+    # Second request should be rejected
+    r2 = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r2.status_code == 503
+    body = r2.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "overloaded_error"
+
+    proceed.set()  # unblock first request
+    r1 = await task1
+    assert r1.status_code == 200
+    await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_nonstreaming_retry_count(make_client, chat_response):
+    """Non-streaming retry should attempt the expected number of times."""
+    call_count = 0
+
+    def handler(r):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            return httpx.Response(503, json={"error": {"message": "overloaded"}})
+        return httpx.Response(200, json=chat_response(body="hi"))
+
+    client, _ = make_client(handler, retry_attempts=3, retry_backoff=0.01)
+    r = await client.post("/v1/messages", json={
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert r.status_code == 200
+    assert call_count == 3  # 2 failures + 1 success
+    await client.aclose()

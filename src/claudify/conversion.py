@@ -505,9 +505,7 @@ async def stream_openai_to_anthropic(
             if parser.done:
                 break
             chunks = parser.feed(raw)
-            had_data = False
             for chunk in chunks:
-                had_data = True
                 if isinstance(chunk.get("usage"), dict):
                     upstream_usage = chunk["usage"]
 
@@ -545,12 +543,16 @@ async def stream_openai_to_anthropic(
                     finish_reason = choice0["finish_reason"]
 
             now = time.monotonic()
-            if not had_data or (now - last_ping_time) >= ping_interval:
+            if (now - last_ping_time) >= ping_interval:
                 yield sse_ping()
                 last_ping_time = now
 
-    except Exception:
-        # On error, close any open blocks and emit synthetic stop
+    except Exception as _exc:
+        # On error, close any open blocks and emit synthetic stop events.
+        # Store the exception on the generator so the caller can detect it
+        # after iteration completes (async generators convert raise to
+        # StopAsyncIteration, hiding the original exception from the caller).
+        stream_openai_to_anthropic._last_error = _exc  # type: ignore[attr-defined]
         for ev in _close_open_blocks(text_block_open, text_block_index, tool_state):
             yield ev
         for _ev in synthetic_stop_events(finish_reason, upstream_usage):
