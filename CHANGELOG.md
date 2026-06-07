@@ -72,6 +72,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SSE parser `_parts` list reused via in-place mutation instead of per-feed allocation
 - `passthrough_error` skips JSON extraction on upstream bodies larger than 8KB
 - systemd `uninstall` no longer creates parent directories (path computation separated from `install`)
+- SSE ping now fires on time interval only (removed redundant idle-chunk burst pings)
 
 ### Fixed
 - `tool_choice: {"type": "none"}` now correctly maps to OpenAI `"none"`
@@ -85,6 +86,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - README examples referenced non-existent CLI flags (`init-config --backend`, `install-service --api-key`)
 - `--completion` CLI flag works as bare flag (`claudify --completion` auto-detects from `$SHELL`) and accepts optional shell argument (`claudify --completion bash`)
 - Retry now catches `httpx.TransportError` (ConnectError, ReadError, WriteError) during streaming
+- Stream errors now logged with traceback and recorded as 502 in metrics (was silently swallowed)
+- Health endpoint catches all `httpx.TransportError` subclasses (was only Timeout+Connect)
+- `count_tokens` success response now includes `x-request-id` header (consistent with other endpoints)
 
 ### Removed
 - Dead code: `_MAX_LATENCY` constant in metrics.py
