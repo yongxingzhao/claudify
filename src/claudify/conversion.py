@@ -53,8 +53,10 @@ def _system_to_openai(system: Any) -> str:
         if not isinstance(item, dict):
             continue
         if item.get("type") == "text":
-            parts.append(item.get("text", ""))
-    return "\n".join(p for p in parts if p)
+            text = item.get("text", "")
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
 
 
 def _user_content_to_openai(content: Any) -> tuple[Any, list[dict[str, Any]]]:
@@ -124,7 +126,9 @@ def _assistant_content_to_openai(content: Any) -> tuple[str, list[dict[str, Any]
             continue
         btype = block.get("type")
         if btype == "text":
-            text_parts.append(block.get("text", ""))
+            text = block.get("text", "")
+            if text:
+                text_parts.append(text)
         elif btype == "tool_use":
             tool_calls.append(
                 {
@@ -138,7 +142,7 @@ def _assistant_content_to_openai(content: Any) -> tuple[str, list[dict[str, Any]
             )
         elif btype == "thinking":
             log.debug("dropping thinking block (%d chars)", len(block.get("thinking", "")))
-    return "\n".join(p for p in text_parts if p), tool_calls
+    return "\n".join(text_parts), tool_calls
 
 
 def extract_text_from_blocks(content: Any) -> str:
@@ -152,28 +156,31 @@ def extract_text_from_blocks(content: Any) -> str:
             continue
         btype = block.get("type")
         if btype == "text":
-            parts.append(block.get("text", ""))
+            text = block.get("text", "")
+            if text:
+                parts.append(text)
         elif btype == "tool_use":
-            # Include tool name and input for token estimation
             name = block.get("name", "")
             inp = block.get("input")
             if name:
                 parts.append(name)
             if isinstance(inp, (dict, list)):
                 parts.append(json.dumps(inp, ensure_ascii=False))
-            elif isinstance(inp, str):
+            elif isinstance(inp, str) and inp:
                 parts.append(inp)
         elif btype == "tool_result":
             tc = block.get("content")
-            if isinstance(tc, str):
+            if isinstance(tc, str) and tc:
                 parts.append(tc)
             elif isinstance(tc, list):
                 for sub in tc:
                     if isinstance(sub, dict) and sub.get("type") == "text":
-                        parts.append(sub.get("text", ""))
+                        text = sub.get("text", "")
+                        if text:
+                            parts.append(text)
         elif btype == "image":
             parts.append("[image omitted]")
-    return "\n".join(p for p in parts if p)
+    return "\n".join(parts)
 
 
 def _convert_tools(tools: Any) -> list[dict[str, Any]] | None:

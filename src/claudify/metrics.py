@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import threading
 
 _BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
@@ -25,9 +26,9 @@ class Metrics:
             self._lat_count[route] = self._lat_count.get(route, 0) + 1
             # Incremental bucket update: O(len(BUCKETS)) per write
             bc = self._bucket_counts.setdefault(route, [0] * len(_BUCKETS))
-            for i, b in enumerate(_BUCKETS):
-                if latency <= b:
-                    bc[i] += 1
+            idx = bisect.bisect_right(_BUCKETS, latency)
+            for i in range(idx):
+                bc[i] += 1
             if upstream_status:
                 bucket = f"{upstream_status // 100}xx"
                 key = f"{route}:{bucket}"

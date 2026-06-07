@@ -35,24 +35,13 @@ class SSEParser:
     _MAX_BUFFER_SIZE = 10 * 1024 * 1024  # 10 MB safety limit
 
     def __init__(self, *, max_buffer_size: int = _MAX_BUFFER_SIZE) -> None:
-        self._parts: list[str] = []
+        self._buf: str = ""
         self._done = False
         self._max_buffer_size = max_buffer_size
-        self._buf_len: int = 0  # incremental length tracking
 
     @property
     def done(self) -> bool:
         return self._done
-
-    def _join_buf(self) -> str:
-        """Join accumulated parts into a single buffer string."""
-        if not self._parts:
-            return ""
-        if len(self._parts) == 1:
-            return self._parts[0]
-        buf = "".join(self._parts)
-        self._parts = [buf]
-        return buf
 
     def feed(self, raw: bytes | str) -> list[dict[str, Any]]:
         """Feed raw bytes/string, return list of parsed SSE data dicts."""
@@ -60,14 +49,11 @@ class SSEParser:
             chunk_text = raw.decode("utf-8", errors="replace")
         else:
             chunk_text = raw
-        # Normalize CRLF to LF for cross-platform compatibility
         chunk_text = chunk_text.replace("\r\n", "\n")
-        self._parts.append(chunk_text)
-        self._buf_len += len(chunk_text)
-        # Guard against unbounded memory growth from malformed upstream streams
-        if self._buf_len > self._max_buffer_size:
+        self._buf += chunk_text
+        if len(self._buf) > self._max_buffer_size:
             raise ValueError("SSE parser buffer exceeded maximum size")
-        buf = self._join_buf()
+        buf = self._buf
         events: list[dict[str, Any]] = []
         while True:
             if "\n\n" in buf:
@@ -90,10 +76,7 @@ class SSEParser:
                     continue
             if self._done:
                 break
-        self._parts.clear()
-        if buf:
-            self._parts.append(buf)
-        self._buf_len = len(buf)
+        self._buf = buf
         return events
 
 

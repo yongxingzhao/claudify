@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -40,15 +41,13 @@ class ConcurrencyLimitMiddleware:
 
     def __init__(self, app: Any, max_concurrency: int) -> None:
         self.app = app
-        self._max = max_concurrency
-        self._active = 0
+        self._semaphore = asyncio.Semaphore(max_concurrency)
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        if self._active >= self._max:
-            # Return 503 Service Unavailable
+        if self._semaphore.locked():
             body = json.dumps({
                 "type": "error",
                 "error": {"type": "overloaded_error", "message": "Server is overloaded, please retry"},
@@ -57,11 +56,8 @@ class ConcurrencyLimitMiddleware:
                         "headers": [[b"content-type", b"application/json"]]})
             await send({"type": "http.response.body", "body": body})
             return
-        self._active += 1
-        try:
+        async with self._semaphore:
             await self.app(scope, receive, send)
-        finally:
-            self._active -= 1
 
 
 def create_app(settings: Settings | None = None, *, http_client: httpx.AsyncClient | None = None) -> FastAPI:
